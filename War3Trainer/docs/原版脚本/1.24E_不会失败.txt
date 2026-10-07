@@ -1,0 +1,9 @@
+[ENABLE]
+game.dll+3bd430:
+xor eax,eax
+inc eax
+ret
+nop
+[DISABLE]
+game.dll+3bd430:
+mov ecx,0000000d

@@ -1,0 +1,147 @@
+# 从原版修改器 exe 中提取的条目表（偏移 / 文本），脚本正文见同目录其它文件
+
+0x000ACA10  我是初始化，快点我
+0x000ACA33  Ctrl+numeric *
+0x000ACA71  <SCRIPT #1 len=23397>
+0x000B21FC  Ctrl+Q
+0x000B221C  war3.exe+17b7bc
+0x000B224A  war3.exe+17b7a0
+0x000B2274  瞬间移动
+0x000B2286  Ctrl+X
+0x000B22A6  war3.exe+17b7a0
+0x000B22D0  杀掉目标单位
+0x000B22E7  Ctrl+W
+0x000B2307  war3.exe+17b7a0
+0x000B2331  MapON
+0x000B233A  Home$
+0x000B2358  war3.exe+17b7a0
+0x000B2382  MapOFF
+0x000B238C  End#
+0x000B23A9  war3.exe+17b7a0
+0x000B23DF  Ctrl+E
+0x000B23FF  war3.exe+17b7a0
+0x000B2429  取消无敌
+0x000B2439  Ctrl+R
+0x000B2459  war3.exe+17b7a0
+0x000B2483  重置技能CD
+0x000B2499  Ctrl+Z
+0x000B24B9  war3.exe+17b7a0
+0x000B24E3  复制给自己
+0x000B24F8  Ctrl+A
+0x000B2518  war3.exe+17b7a0
+0x000B2542  复制单位
+0x000B2553  Ctrl+B
+0x000B2573  war3.exe+17b7a0
+0x000B259E  大量复制
+0x000B25B0  Ctrl+N
+0x000B25D0  war3.exe+17b7b4
+0x000B25FF  war3.exe+17b7a0
+0x000B262A  复制物品(英雄背包中的
+0x000B2651  Ctrl+D
+0x000B2671  war3.exe+17b7a0
+0x000B269C  设置大小
+0x000B26B7  Ctrl+P
+0x000B26D7  war3.exe+17b7a4
+0x000B2705  war3.exe+17b7a0
+0x000B2730  丢弃所有物品
+0x000B2749  Ctrl+T
+0x000B2769  war3.exe+17b7a0
+0x000B2794  物品999个
+0x000B27A8  Ctrl+F
+0x000B27C8  war3.exe+17b7a8
+0x000B27F8  war3.exe+17b7a0
+0x000B2823  添加技能
+0x000B2836  Ctrl+G
+0x000B2856  war3.exe+17b7ac
+0x000B2877  AInv
+0x000B2887  war3.exe+17b7a0
+0x000B28B2  删除技能
+0x000B28C2  Ctrl+J
+0x000B28E2  war3.exe+17b7a0
+0x000B290D  设置钱和木
+0x000B2924  Ctrl+L
+0x000B2944  war3.exe+17b7cc
+0x000B2965  9999
+0x000B2975  war3.exe+17b7a0
+0x000B29A0  获得对方控制权
+0x000B29BB  Ctrl+I
+0x000B29DB  war3.exe+17b7a0
+0x000B2A06  得到神器
+0x000B2A18  Ctrl+Y
+0x000B2A38  war3.exe+17b7a0
+0x000B2A73  Ctrl+numeric 1
+0x000B2A9B  war3.exe+17b7a0
+0x000B2AD7  Ctrl+numeric 2
+0x000B2AFF  war3.exe+17b7a0
+0x000B2B2A  不会失败
+0x000B2B3B  Ctrl+numeric 3
+0x000B2B79  <SCRIPT #2 len=118>
+0x000B2BE3  呼叫增援
+0x000B2BF6  Ctrl+numeric 4
+0x000B2C1E  war3.exe+17b7c0
+0x000B2C3F  hcth
+0x000B2C4F  war3.exe+17b7a0
+0x000B2C7A  请大象赐予装备
+0x000B2C97  Ctrl+numeric 5
+0x000B2CBF  war3.exe+17b7b0
+0x000B2CE0  amrc
+0x000B2CF0  war3.exe+17b7a0
+0x000B2D1B  得到科技
+0x000B2D2E  Ctrl+numeric 6
+0x000B2D56  war3.exe+17b7c4
+0x000B2D77  Rhde
+0x000B2D87  war3.exe+17b7a0
+0x000B2DB2  娱乐模式
+0x000B2DC5  Ctrl+numeric 7
+0x000B2E03  <SCRIPT #3 len=176>
+0x000B2EBB  <SCRIPT #4 len=107>
+0x000B2F38  <SCRIPT #5 len=258>
+0x000B3016  <SCRIPT #6 len=156>
+0x000B309A  创建所有物品！ (请慎重使用
+0x000B30CB  Ctrl+numeric 8
+0x000B30F3  war3.exe+17b7a0
+0x000B311E  重叠技能1 (魔法恢复光环)
+0x000B314A  Down Arrow+numeric 1(
+0x000B3178  war3.exe+17b7c8
+0x000B3199  ANre
+0x000B31A9  war3.exe+17b7a0
+0x000B31D4  重叠技能2_闪电链
+0x000B31F6  Down Arrow+numeric 2(
+0x000B3224  war3.exe+17b7c8
+0x000B3245  AOcl
+0x000B3255  war3.exe+17b7a0
+0x000B3280  技能3_震荡波
+0x000B3298  Down Arrow+numeric 3(
+0x000B32C6  war3.exe+17b7c8
+0x000B32E7  AOs2
+0x000B32F7  war3.exe+17b7a0
+0x000B3322  4 _腐臭蜂群
+0x000B3337  Down Arrow+numeric 4(
+0x000B3365  war3.exe+17b7c8
+0x000B3386  AUcs
+0x000B3396  war3.exe+17b7a0
+0x000B33C1  尖刺外壳
+0x000B33D4  Down Arrow+numeric 8(
+0x000B3402  war3.exe+17b7c8
+0x000B3423  AUts
+0x000B3433  war3.exe+17b7a0
+0x000B345E  凤凰火焰
+0x000B3472  Down Arrow+numeric 9(
+0x000B34A0  war3.exe+17b7c8
+0x000B34C1  Apxf
+0x000B34D1  war3.exe+17b7a0
+0x000B34FC  全BUFF
+0x000B3508  Alt+E
+0x000B3527  war3.exe+17b7a0
+0x000B3552  最喜欢小动物了
+0x000B3570  Alt+D
+0x000B358F  war3.exe+17b7a0
+0x000B35BA  允许光环叠加
+0x000B35D4  Ctrl+numeric 9
+0x000B3612  <SCRIPT #7 len=86>
+0x000B365D  英雄最大等级10W
+0x000B367B  Alt+numeric 1
+0x000B36B8  <SCRIPT #8 len=1413>
+0x000B3C22  war3 1.20e修改器V3.04by大象
+0x000B3C47  war3.exe
+0x000B3C61  This trainer was made by  \n Cheat Engine \n www.cheatengine.org \n 游戏进程war3.exe \n 游戏版本1.20e \n  \n 打开游戏和修改器，初始化修改器，建图开玩。 \n (换图无需再次初始化) \n  \n  \n 单位名称，技能名称等请自行在地图编辑器中找。 \n 自定义技能请自行用hke拆开地图寻找。 \n  \n 重叠技能非常有意思。 \n 不过要记住，光环技能不可重叠。 \n  \n 祝各位早日脱离魔兽。 \n  \n                   大象 \n                   20100708 \n             kickclock@hotmail.com?

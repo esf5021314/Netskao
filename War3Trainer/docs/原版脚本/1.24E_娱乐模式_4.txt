@@ -1,0 +1,14 @@
+[ENABLE]
+globalalloc(myhook_fasttrain,0x1000)
+game.dll+29c2de:
+jmp myhook_fasttrain  //刚好5字节然后返回，所以不会跳回去了 
+
+myhook_fasttrain:
+mov eax,1
+pop ecx
+ret
+[DISABLE]
+game.dll+29c2de:
+mov eax,[eax+18]
+pop ecx
+ret

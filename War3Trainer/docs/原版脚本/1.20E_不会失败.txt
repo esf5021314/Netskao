@@ -1,0 +1,9 @@
+[ENABLE]
+game.dll+2d436f:
+mov eax,1
+ret
+[DISABLE]
+game.dll+2d436f:
+xor eax,eax
+ret
+db 90 90 90

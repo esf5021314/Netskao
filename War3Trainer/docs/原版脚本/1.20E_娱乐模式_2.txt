@@ -1,0 +1,7 @@
+[ENABLE]
+game.dll+1a88c9:
+mov eax,4
+nop
+[DISABLE]
+game.dll+1a88c9:
+mov eax,[edx+000001b0]

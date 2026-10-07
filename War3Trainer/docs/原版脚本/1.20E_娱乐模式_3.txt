@@ -1,0 +1,22 @@
+[ENABLE]
+game.dll+1a6ca9:
+mov eax,1
+pop edi
+pop esi
+pop ebx
+mov esp,ebp
+pop ebp
+ret
+nop
+nop
+[DISABLE]
+game.dll+1a6ca9:
+mov eax,[edx+18]
+pop edi
+pop esi
+pop ebx
+mov esp,ebp
+pop ebp
+ret
+nop
+nop

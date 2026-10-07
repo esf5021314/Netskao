@@ -1,0 +1,15 @@
+[ENABLE]
+game.dll+0af71:
+nop
+nop
+mov eax,0000ffff
+
+game.dll+8882fc:
+dd #65535
+[DISABLE]
+game.dll+0af71:
+db 7e 1d
+mov eax,0000012c
+
+game.dll+8882fc:
+dd #100

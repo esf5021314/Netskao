@@ -1,0 +1,6 @@
+[ENABLE]
+game.dll+43efa9:
+db 90 90 
+[DISABLE]
+game.dll+43efa9:
+db 75 1b

@@ -1,0 +1,12 @@
+[ENABLE]
+game.dll+8ca6:
+db 90 90
+mov eax,ffff
+game.dll+70636C:
+dd #65535
+[DISABLE]
+game.dll+8ca6:
+db 7e 1e
+mov eax,12c
+game.dll+70636C:
+dd #100

@@ -1,0 +1,866 @@
+[ENABLE]
+fullaccess(war3.exe+70000,0x1000)
+//脚本编写 瘸腿大象
+//如果在游戏版本不是1.24E，需修正define部分的游戏函数地址，和入口地址 
+
+globalalloc(myhook_install,0x3000)
+label(xmyhook_install)
+//=========游戏函数 
+define(tablekey,war3.exe+70000)    //判断修改器做什么 
+define(UnitSize,war3.exe+70004)    //改变单位大小用的数值
+define(ItemNum,war3.exe+70008)    //改变物品数量用的数值
+define(Sikll,war3.exe+7000c)    //添加技能用的数值
+define(ItemName,war3.exe+70010) //物品代码
+define(copycounter,war3.exe+70014) //多次复制数量
+define(SkillLV,war3.exe+70018)    //设置技能等级
+define(HeroLv,war3.exe+7001c)    //英雄升级数
+define(HelperName,war3.exe+70020)    //增援代码 
+define(TechName,war3.exe+70024)    //科技代码 
+define(MouseXYPointer,Game.dll+0AE54D0) //鼠标坐标指针
+  
+//游戏内部未公开函数 
+define(InGame_MoveUnit,game.dll+474d60) //arg1{xy} arg2 1 ecx=单位+164 
+define(InGame_GetUnitAddress,game.dll+3BE7F0) //取单位内存地址 
+define(InGame_UnitAddAbitily,game.dll+24d900)
+
+//游戏相关 
+define(IsNoDefeatCheat,game.dll+3bd430)
+define(IsNoVictoryCheat,game.dll+3bd400)
+define(CreateGroup,game.dll+3d3440)
+define(GroupClear,game.dll+3c4b60)
+define(GroupAddUnit,game.dll+3c4b00)
+define(FogEnable,game.dll+3bbd20)
+define(FogMaskEnable,game.dll+3bbd50)
+define(Location,game.dll+3d0ef0)
+define(TimerStart,game.dll+3c1eb0)
+define(GetFloatGameState,game.dll+3bce50)
+define(StopSound,game.dll+3cd9f0)
+define(StartSound,game.dll+3cd9c0)
+
+//玩家相关
+define(Player,game.dll+3bc670) 
+define(GetLocalPlayer,game.dll+3bc6a0)
+define(GetOwningPlayer,game.dll+3c8cd0)
+//define(GetPlayerAlliance,-------)  //未使用
+define(SetPlayerAlliance,game.dll+3c1b90)
+define(GetPlayerState,game.dll+3ca640)
+define(SetPlayerState,game.dll+3ca5e0)
+define(SetPlayerTechResearched,game.dll+3ca270) //玩家，科技，等级
+
+//单位相关
+define(CreateUnit,game.dll+3c5d70)
+define(CreateUnitAtLoc,game.dll+3c5e10)
+define(FirstOfGroup,game.dll+3c4fa0)
+define(GetUnitTypeId,game.dll+3c6450)
+define(GroupEnumUnitsSelected,game.dll+3cf0d0)
+define(KillUnit,game.dll+3c8b80)
+define(SetUnitInvulnerable,game.dll+3c7e30) 
+define(SetUnitPosition,game.dll+3c6590)
+define(SetUnitScale,game.dll+3c6e10)
+define(GetUnitLoc,game.dll+3d3620)
+define(SetUnitX,game.dll+3c64b0)
+define(SetUnitY,game.dll+3c6520)
+ 
+//英雄相关 
+define(GetHeroLevel,game.dll+3c7a10)
+define(SetHeroLevel,game.dll+3c78b0)
+define(AddHeroXP,game.dll+3c7830)
+define(ReviveHero,game.dll+3c7630)
+
+//物品相关 
+define(CreateItem,game.dll+3bc4e0)
+define(GetItemTypeId,game.dll+3c57a0)
+define(SetItemCharges,game.dll+3c5bb0)
+define(UnitItemInSlot,game.dll+3c8270)
+define(UnitRemoveItemFromSlot,game.dll+3c81e0) 
+define(UnitAddItem,game.dll+3c7f30) //需要先CreateItem。
+define(UnitAddItemToSlotById,game.dll+3c80f0)  //单位，物品，位置(0-5)如果已经有了就掉在地上 
+
+//技能相关
+define(UnitAddAbility,game.dll+3c8de0)  
+define(SetUnitAbilityLevel,game.dll+3c7cf0)   
+define(UnitRemoveAbility,game.dll+3c8e50)
+define(UnitResetCoolDown,game.dll+3c9210)
+
+//===========自定义函数
+//初始化1个全局组。减少内存泄漏。用于所有的组操作
+//返回选中单位组中第1个单位
+//取鼠标指向的地图坐标 
+define(mycall_InstallGroup,myhook_install+1800)  //21 
+define(mycall_GetSelectUnit,myhook_install+1840) //22
+define(mycall_GetMouseXYinMap,myhook_install+18a0)   //1E
+define(mycall_converskill,myhook_install+18c0) //2A 只转换[skill]数值 
+define(mycall_convertNametoId,myhook_install+1900) //2A 参数是文本，返回数值 
+
+ 
+//============自定义数据
+//2000 xy，鼠标在地图中的坐标
+//2010 GROUP,全局使用的组，为了减少内存泄漏 
+//2014 LocalPlayer
+//2020 Unit选中单位
+//2024 UnitOwniner选中单位所属玩家 
+//2030 mycall_GetSelectUnitV2临时使用 
+define(MouseX,myhook_install+2000)
+define(MouseY,myhook_install+2004)
+define(MouseZ,myhook_install+2008) //实际上总为0 
+define(GROUP,myhook_install+2010) 
+define(LOCALPLAYER,myhook_install+2014)
+define(Loc,myhook_install+2018)
+define(Unit,myhook_install+2020)
+define(UnitOwniner,myhook_install+2024)
+define(UnitTypeId,myhook_install+2028)
+define(temp1,myhook_install+2030)      //临时变量。只是为了看着舒服 
+define(temp2,myhook_install+2034)
+define(temp3,myhook_install+2038)
+define(temp4,myhook_install+203c)
+define(text1,myhook_install+2050)
+
+//=============hook入口
+game.dll+4D3E30:
+jmp myhook_install
+nop
+xmyhook_install:
+
+//判断标志决定是否执行修改 
+myhook_install:
+test ecx,ecx
+db 75 06
+mov [GROUP],ecx  //每次重新开始后，都重置全局组           
+mov eax,[tablekey]
+test eax,eax
+db 74 0f
+pushad
+call myhook_install+40
+xor eax,eax
+mov [tablekey],eax
+popad
+mov [game.dll+0acecf0],ecx
+jmp xmyhook_install
+
+myhook_install+40:         //判断标志执行对应修改
+push eax 
+call mycall_InstallGroup        //首先初始化全局组
+pop eax 
+cmp eax,1                   //1==升级 
+je myhook_install+200       //16
+cmp eax,2                   //2==瞬移 
+je myhook_install+280       //22
+cmp eax,3                   //3==killunit
+je myhook_install+300       //f
+cmp eax,4                   //4==mapon
+je myhook_install+380       //12
+cmp eax,5                   //5==mapoff
+je myhook_install+400       //12
+cmp eax,6                   //6==选中单位无敌 
+je myhook_install+480       //11
+cmp eax,7                   //7==选中单位不无敌 
+je myhook_install+500       //11
+cmp eax,8                   //8==选中单位重置技能CD 
+je myhook_install+580       //f
+cmp eax,9                   //9==复制选中单位到鼠标位置给玩家自己 
+je myhook_install+600      //47
+cmp eax,0a                  //a==复制所有物品 
+je myhook_install+680      //63
+cmp eax,0b                  //b==改变单位大小 
+je myhook_install+700      //1d
+cmp eax,0c                  //c==设置物品数量 
+je myhook_install+780      //23
+cmp eax,0d                  //d==丢弃所有物品 
+je myhook_install+800      //40
+cmp eax,0e                  //e==添加技能 
+je myhook_install+880      //1b
+cmp eax,0f                  //f==复制单位 
+je myhook_install+900
+cmp eax,10                 //10==选中单位所属玩家给玩家完全控制权 
+je myhook_install+980
+cmp eax,11                 //11==显示文本  未完成。
+je myhook_install+0a00
+cmp eax,12                 //12==所有玩家100W钱和木 
+je myhook_install+0a80
+cmp eax,13                 //13==复制10个，用于刷杀敌数量 
+je myhook_install+0b00
+cmp eax,14                 //14==设置技能等级 
+je myhook_install+0b80
+cmp eax,15                 //15==删除技能 
+je myhook_install+0e00
+cmp eax,16                 //16==全光环 
+je myhook_install+0e20
+cmp eax,17                 //17==全被动 
+je myhook_install+0f50
+cmp eax,18                 //18==得到6个装备 
+je myhook_install+0fe0
+cmp eax,19                 //19==呼叫增援 
+je myhook_install+1080
+cmp eax,1A                 //1A==得到物品 
+je myhook_install+1100
+cmp eax,1b                 //1b==科技等级 
+je myhook_install+1180
+ret
+//d0
+
+label(myhook_install200l1)
+myhook_install+200:
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+mov eax,[Unit]
+push eax
+call GetHeroLevel
+add esp,04
+mov [temp1],eax
+mov eax,[HeroLv]
+mov [temp2],eax
+myhook_install200l1:
+mov eax,[temp2]
+test eax,eax
+db 75 01
+ret
+inc [temp1]
+mov eax,[temp1]
+mov ebx,[Unit]
+push 1
+push eax
+push ebx
+call SetHeroLevel
+add esp,0c
+dec [temp2]
+jmp myhook_install200l1 
+
+myhook_install+280:
+call mycall_GetMouseXYinMap
+call mycall_GetSelectUnit
+mov eax,[Unit]
+lea ebx,[MouseY]
+lea ecx,[MouseX]
+push ebx
+push ecx
+push eax 
+call SetUnitPosition
+add esp,0c
+ret
+
+myhook_install+300:
+call mycall_GetSelectUnit
+mov eax,[Unit]
+push eax
+call KillUnit
+add esp,4
+ret
+
+myhook_install+380:   //mapon
+push 0
+call FogEnable
+push 0
+call FogMaskEnable
+add esp,8
+ret
+
+myhook_install+400:   //mapoff
+push 1
+call FogEnable
+push 1
+call FogMaskEnable
+add esp,8
+ret
+
+myhook_install+480:   //选中单位无敌
+call mycall_GetSelectUnit
+mov eax,[Unit]
+push 1
+push eax
+call SetUnitInvulnerable
+add esp,8
+ret
+
+myhook_install+500:   //选中单位不无敌
+call mycall_GetSelectUnit
+mov eax,[Unit]
+push 0
+push eax
+call SetUnitInvulnerable
+add esp,8
+ret
+
+myhook_install+580:    //选中单位重置技能CD
+call mycall_GetSelectUnit
+mov eax,[Unit]
+push eax
+call UnitResetCoolDown
+add esp,4
+ret
+
+myhook_install+600:   //复制选中单位到鼠标位置给玩家自己
+call mycall_GetMouseXYinMap
+lea eax,[MouseY]
+push eax
+lea eax,[MouseX]
+push eax
+call Location
+add esp,8
+mov [Loc],eax
+call mycall_GetSelectUnit
+{lea ebx,[MouseX]
+push ebx
+mov ebx,[Loc]
+push ebx
+mov eax,[UnitTypeId]
+push eax
+mov eax,[LOCALPLAYER]
+push eax
+call CreateUnitAtLoc
+add esp,10}
+lea eax,[MouseZ]
+push eax
+lea eax,[MouseY]
+push eax
+lea eax,[MouseX]
+push eax
+mov eax,[UnitTypeId]
+push eax
+mov eax,[LOCALPLAYER]
+push eax
+call CreateUnit
+add esp,14
+ret
+
+label(myhook_install0680L1)
+myhook_install+680: //复制所有物品
+call mycall_GetMouseXYinMap
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+mov eax,5 
+mov [temp1],eax 
+myhook_install0680L1:
+mov eax,[temp1]
+cmp eax,ffffffff
+db 75 01
+ret
+mov ecx,[Unit]
+push eax
+push ecx
+call UnitItemInSlot
+push eax
+call GetItemTypeId
+lea ebx,[MouseY]
+push ebx
+lea ebx,[MouseX]
+push ebx
+push eax
+call CreateItem
+add esp,18
+dec [temp1] 
+jmp myhook_install0680L1
+
+
+myhook_install+700:  //改变单位大小
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+mov eax,[Unit]
+lea ebx,[UnitSize]
+push ebx
+push ebx
+push ebx
+push eax
+call SetUnitScale
+add esp,10
+ret
+myhook_install+780:  //设置物品数量
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+mov eax,[Unit]
+push 0
+push eax
+call UnitItemInSlot
+mov ebx,[ItemNum]
+push ebx
+push eax
+call SetItemCharges
+add esp,10
+ret
+
+label(myhook_install0800L1)
+myhook_install+800:  //丢弃所有物品
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+mov eax,5 
+mov [temp1],eax 
+myhook_install0800L1:
+mov eax,[temp1]
+cmp eax,ffffffff
+db 75 01
+ret
+mov ecx,[Unit]
+push eax
+push ecx
+call UnitRemoveItemFromSlot
+add esp,8
+dec [temp1] 
+jmp myhook_install0800L1
+
+myhook_install+880:  //添加技能
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+call mycall_converskill
+mov [temp1],eax
+mov ecx,[Unit]            //取单位地址 
+call InGame_GetUnitAddress
+test eax,eax
+db 75 01
+ret
+push 0
+push 0
+push 0
+mov edx,[temp1]
+mov ecx,eax
+call InGame_UnitAddAbitily
+push 70
+mov eax,[temp1] //技能ID 
+push eax
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,0c
+ret
+
+{push eax
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+add esp,8}
+ret 
+
+myhook_install+900:  //复制单位
+call mycall_GetMouseXYinMap
+lea eax,[MouseY]
+push eax
+lea eax,[MouseX]
+push eax
+call Location
+mov [Loc],eax
+call mycall_GetSelectUnit
+lea ebx,[MouseX]
+push ebx
+mov ebx,[Loc]
+push ebx
+mov eax,[UnitTypeId]
+push eax
+mov eax,[UnitOwniner]
+push eax
+call CreateUnitAtLoc
+add esp,18
+ret
+
+myhook_install+980:      //选中单位所属玩家给玩家完全控制权
+call mycall_GetSelectUnit
+push 1
+push 6
+mov eax,[LOCALPLAYER]
+push eax
+mov eax,[UnitOwniner]
+push eax
+call SetPlayerAlliance
+push 1
+push 7
+mov eax,[LOCALPLAYER]
+push eax
+mov eax,[UnitOwniner]
+push eax
+call SetPlayerAlliance
+add esp,20
+ret
+
+myhook_install+0a00:   //显示文字
+ret
+
+label(myhook_install0a80L1)
+myhook_install+0a80:  //所有玩家100w资源
+mov eax,#11
+mov [temp1],eax
+myhook_install0a80L1:
+mov eax,[temp1]
+cmp eax,ffffffff
+db 75 01
+ret
+push eax
+call Player
+mov [temp2],eax
+push #1000000
+push 1
+push eax
+call SetPlayerState
+mov eax,[temp2]
+push #1000000
+push 2
+push eax
+call SetPlayerState
+add esp,1c
+dec [temp1] 
+jmp myhook_install0a80L1
+
+label(myhook_install0b00L1)
+myhook_install+0b00:  //复制10个，用于刷杀敌数量
+xor eax,eax
+mov eax,[copycounter]
+test eax,eax
+db 75 01
+ret
+mov [temp1],eax
+call mycall_GetMouseXYinMap
+lea eax,[MouseY]
+push eax
+lea eax,[MouseX]
+push eax
+call Location
+mov [Loc],eax
+call mycall_GetSelectUnit
+add esp,08
+myhook_install0b00L1:
+mov eax,[temp1]
+test eax,eax
+db 75 01
+ret
+lea ebx,[MouseX]
+push ebx
+mov ebx,[Loc]
+push ebx
+mov eax,[UnitTypeId]
+push eax
+mov eax,[UnitOwniner]
+push eax
+call CreateUnitAtLoc
+add esp,10
+dec [temp1]
+jmp myhook_install0b00L1
+ret
+
+myhook_install+0b80:  //设置技能等级  与添加技能合并 
+ret
+
+myhook_install+0e00:  //删除技能 
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+call mycall_converskill
+push eax
+mov eax,[Unit]
+push eax
+call UnitRemoveAbility
+add esp,08
+ret
+
+myhook_install+0e20:  //全光环 
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+push 41486162  //辉煌光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41486162
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41486164  //专注光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41486164
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 414f7232  //耐久光环(卡林)
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 414f7232
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41556175  //邪恶光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41556175
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41556176  //吸血光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41556176
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41456172  //强击光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41456172
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41436163  //命令光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41436163
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 416f6172  //治疗守卫光环
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+add esp,8
+ret
+
+myhook_install+0f50: //全被动 
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+push 41496e76  //物品栏英雄 
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+add esp,8
+push 41486268  //重击
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41486268
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 414f6372 //致命1击
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 414f6372
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+push 41636462  //醉拳(陈) 30% 10%6B
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+push 70
+push 41636462
+mov eax,[Unit]
+push eax
+call SetUnitAbilityLevel
+add esp,14
+ret
+
+myhook_install+0fe0: //添加6个物品给选中单位
+call mycall_GetSelectUnit
+test eax,eax
+db 75 01
+ret
+push 41496e76  //先给单位添加物品栏 
+mov eax,[Unit] 
+push eax
+call UnitAddAbility
+add esp,8
+push 5
+push 7372746c  //瑟拉思尔  15攻击 15%攻速
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+push 4
+push 7372746c  //瑟拉思尔
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+push 3
+push 7372746c  //瑟拉思尔
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+push 2
+push 7372746c  //瑟拉思尔
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+push 1
+push 66726867  //火焰手套  5护甲 20%攻速
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+push 0
+push 6b6c6d6d  //远古战斧 20攻击 吸血
+mov eax,[Unit] 
+push eax  
+call UnitAddItemToSlotById
+add esp,0c
+ret 
+
+myhook_install+1080: //呼叫增援
+call mycall_GetMouseXYinMap
+lea eax,[MouseY]
+push eax
+lea eax,[MouseX]
+push eax
+call Location
+mov [Loc],eax
+lea ebx,[MouseX]
+push ebx
+mov ebx,[Loc]
+push ebx
+mov eax,[HelperName]        //取增援代码 
+push eax
+call mycall_convertNametoId 
+push eax
+mov eax,[LOCALPLAYER]
+push eax
+call CreateUnitAtLoc
+add esp,18
+ret
+
+myhook_install+1100: //1A==得到物品
+call mycall_GetMouseXYinMap
+mov eax,[ItemName]
+push eax
+call mycall_convertNametoId
+lea ebx,[MouseY]
+push ebx
+lea ebx,[MouseX]
+push ebx
+push eax
+call CreateItem
+add esp,0c
+ret
+
+myhook_install+1180:
+db 90 90 90 90 90 90
+push 70
+mov eax,[TechName]
+push eax
+call mycall_convertNametoId
+push eax
+mov eax,[LOCALPLAYER]
+push eax
+call SetPlayerTechResearched
+add esp,0c
+ret  
+//==========以下是自定义函数部分 
+mycall_InstallGroup:      
+mov eax,[GROUP]
+test eax,eax
+db 74 01
+ret
+call CreateGroup
+mov [GROUP],eax
+call GetLocalPlayer
+mov [LOCALPLAYER],eax
+ret
+
+mycall_GetSelectUnit:
+push 0
+mov eax,[LOCALPLAYER]
+push eax
+mov eax,[GROUP]
+push eax
+call GroupEnumUnitsSelected
+mov eax,[GROUP]
+push eax
+call FirstOfGroup
+mov [Unit],eax
+mov eax,[Unit]
+push eax
+call GetOwningPlayer
+mov [UnitOwniner],eax
+mov eax,[Unit]
+push eax
+call GetUnitTypeId
+mov [UnitTypeId],eax
+add esp,18
+ret
+
+mycall_GetMouseXYinMap:
+mov eax,[MouseXYPointer]
+mov ebx,[eax+310]
+mov [MouseX],ebx
+mov ebx,[eax+314]
+mov [MouseY],ebx
+ret
+
+mycall_converskill:
+xor eax,eax
+xor ecx,ecx
+mov ebx,[Sikll]
+mov al,bl
+ror eax,8
+ror ebx,8
+mov cl,bl
+rol ecx,10
+add eax,ecx
+ror ebx,8
+xor ecx,ecx
+mov cl,bl
+rol ecx,8
+add eax,ecx
+ror ebx,8
+mov al,bl
+ret
+
+mycall_convertNametoId:
+xor eax,eax
+xor ecx,ecx
+mov ebx,[esp+4]
+mov al,bl
+ror eax,8
+ror ebx,8
+mov cl,bl
+rol ecx,10
+add eax,ecx
+ror ebx,8
+xor ecx,ecx
+mov cl,bl
+rol ecx,8
+add eax,ecx
+ror ebx,8
+mov al,bl
+ret 04
+
+
+[DISABLE]
+game.dll+4D3E30:
+mov [game.dll+0acecf0],ecx

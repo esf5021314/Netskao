@@ -1,0 +1,37 @@
+// Resource script (kept pure ASCII so that both rc.exe and windres accept it)
+//   1) application icon
+//   2) manifest: requireAdministrator + Common Controls v6 + DPI aware
+//   3) version information
+#include <windows.h>
+#include "../src/gui/resource.h"
+
+IDI_APP ICON "trainer.ico"
+
+1 24 "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "Warcraft III Trainer (C++ rebuild of the Elephant trainer)"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "War3Trainer"
+            VALUE "OriginalFilename", "War3Trainer.exe"
+            VALUE "ProductName", "War3Trainer"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

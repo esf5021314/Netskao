@@ -1,0 +1,13 @@
+# 编译中间文件（bin/ 下的成品需要提交）
+build/
+*.obj
+*.o
+*.res
+*.pdb
+*.ilk
+*.exp
+bin/*.lib
+.vs/
+out/
+CMakeSettings.json
+__pycache__/

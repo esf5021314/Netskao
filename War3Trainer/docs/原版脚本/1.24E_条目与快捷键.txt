@@ -1,0 +1,102 @@
+# 从原版修改器 exe 中提取的条目表（偏移 / 文本），脚本正文见同目录其它文件
+
+0x000ACA10  我是初始化，快点我
+0x000ACA31  Ctrl+numeric *
+0x000ACA6F  <SCRIPT #1 len=18293>
+0x000B0E2B  SetHeroLevel (Lv+Value)
+0x000B0E46  Ctrl+Q
+0x000B0E66  war3.exe+7001c
+0x000B0E93  war3.exe+70000
+0x000B0EBC  SetUnitPosition
+0x000B0ECF  Ctrl+X
+0x000B0EEF  war3.exe+70000
+0x000B0F18  KillUnit
+0x000B0F24  Ctrl+W
+0x000B0F44  war3.exe+70000
+0x000B0F6D  MapON
+0x000B0F76  Home$
+0x000B0F94  war3.exe+70000
+0x000B0FBD  MapOFF
+0x000B0FC7  End#
+0x000B0FE4  war3.exe+70000
+0x000B100D  SetUnitInvulnerable (True)
+0x000B102B  Ctrl+E
+0x000B104B  war3.exe+70000
+0x000B1074  SetUnitInvulnerable (False)
+0x000B1093  Ctrl+R
+0x000B10B3  war3.exe+70000
+0x000B10DC  UnitResetCoolDown
+0x000B10F1  Ctrl+Z
+0x000B1111  war3.exe+70000
+0x000B113A  CopyUnit for LocalPlayer
+0x000B1156  Ctrl+A
+0x000B1176  war3.exe+70000
+0x000B119F  CopyUnit
+0x000B11AB  Ctrl+B
+0x000B11CB  war3.exe+70000
+0x000B11F5  CopyUnit (Value)
+0x000B1209  Ctrl+N
+0x000B1229  war3.exe+70014
+0x000B1257  war3.exe+70000
+0x000B1281  CopyItem
+0x000B128D  Ctrl+D
+0x000B12AD  war3.exe+70000
+0x000B12D7  DropItem
+0x000B12E3  Ctrl+T
+0x000B1303  war3.exe+70000
+0x000B132D  添加装备
+0x000B1340  Ctrl+Y
+0x000B1360  war3.exe+70000
+0x000B138A  SetItemCharges (Value)
+0x000B13A4  Ctrl+F
+0x000B13C4  war3.exe+70008
+0x000B13F3  war3.exe+70000
+0x000B141D  SetUnitSize (Float)
+0x000B1434  Ctrl+P
+0x000B1454  war3.exe+70004
+0x000B1483  war3.exe+70000
+0x000B14AD  UnitAddAbility (ASCII)
+0x000B14C7  Ctrl+G
+0x000B14E7  war3.exe+7000C
+0x000B1507  AInv
+0x000B1517  war3.exe+70000
+0x000B1541  UnitRemoveAbility
+0x000B1556  Ctrl+J
+0x000B1576  war3.exe+70000
+0x000B15A0  FullControl Player (SelectUnit)
+0x000B15C4  Ctrl+I
+0x000B15E4  war3.exe+70000
+0x000B160E  1,000,000 Money and Lumber
+0x000B162C  Ctrl+L
+0x000B164C  war3.exe+70000
+0x000B1686  Ctrl+numeric 1
+0x000B16AE  war3.exe+70000
+0x000B16E7  Ctrl+numeric 2
+0x000B170F  war3.exe+70000
+0x000B1739  NoDefeat
+0x000B1745  Ctrl+numeric 3
+0x000B1783  <SCRIPT #2 len=121>
+0x000B17F0  呼叫增援
+0x000B1802  Ctrl+numeric 4
+0x000B182A  war3.exe+70020
+0x000B184A  nbel
+0x000B185A  war3.exe+70000
+0x000B1884  请大象赐予装备
+0x000B18A3  Ctrl+numeric 5
+0x000B18CB  war3.exe+70010
+0x000B18EB  amrc
+0x000B18FB  war3.exe+70000
+0x000B1925  获得科技
+0x000B1937  Ctrl+numeric 6
+0x000B195F  war3.exe+70024
+0x000B197F  Rhde
+0x000B198F  war3.exe+70000
+0x000B19B9  娱乐模式
+0x000B19CC  Ctrl+numeric 7
+0x000B1A0A  <SCRIPT #3 len=107>
+0x000B1A81  <SCRIPT #4 len=197>
+0x000B1B48  <SCRIPT #5 len=279>
+0x000B1C56  <SCRIPT #6 len=242>
+0x000B1D43  war3 1.24E修改器V1.6by大象
+0x000B1D67  war3.exe
+0x000B1D81  This trainer was made by  \n Cheat Engine \n www.cheatengine.org \n Process war3.exe \n Ver 1.24E (1.24.4.6387) \n 2010年6月25日 \n  \n 总有人弄不清楚怎么用，这次专门说1下 \n 打开游戏和修改器。 \n 初始化修改器。 \n 建图开玩。(重新建图不需要再次初始化)?

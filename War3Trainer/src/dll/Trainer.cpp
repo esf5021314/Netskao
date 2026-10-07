@@ -1,0 +1,677 @@
+﻿// 模块说明：命令执行层，见 Trainer.h
+//
+// 每个功能都对照原版 CE 脚本实现，注释里写明对应的脚本段落：
+//   [124E+xxx] = war3 1.24E修改器V1.6by大象 脚本中 myhook_install+xxx 处的分支
+//   [120E+xxx] = war3 1.20e修改器V3.04by大象 脚本中 myhook_install+xxx 处的分支
+//   [127A]     = 魔兽争霸1.27终极版（易语言）功能清单中的项目，原版代码被混淆，按功能用 JASS 原生函数实现
+//
+// 与原版的差异：
+//   * 原版用一个全局单位组反复使用，换图后单位组失效会导致“选不中单位”；
+//     这里每次 CreateGroup / DestroyGroup，没有泄漏也不会失效。
+//   * 原版复制单位用 Location + CreateUnitAtLoc，每次泄漏一个 location；这里直接用坐标。
+//   * 所有游戏调用都包在 SafeRun 里，出错只让这一条命令失败。
+//   * 检测到多人游戏（超过一个真人玩家）时拒绝执行：本修改器只用于单人游戏，
+//     与游戏自带的作弊码（whosyourdaddy 等）适用范围一致，也避免多人游戏不同步掉线。
+#include "stdafx.h"
+#include "Trainer.h"
+#include "Jass.h"
+#include "Tools.h"
+#include "Patch.h"
+#include "SafeCall.h"
+#include <vector>
+#include <set>
+
+using namespace jass;
+
+// ---------------------------------------------------------------------------
+// 4字符代码常量
+// ---------------------------------------------------------------------------
+static inline int FourCC(const char* s) { return (int)W3T_FourCC(s); }
+
+// 全光环 [124E+0E20] / [120E+0C80]：最后一个“治疗守卫光环”原版没有设置等级
+static const char* const kAuraCodes[] = { "AHab", "AHad", "AOr2", "AUau", "AUav", "AEar", "ACac" };
+static const char* const kAuraNoLevel = "Aoar";
+// 全被动 [124E+0F50] / [120E+0E00]：先加英雄物品栏，再加重击 / 致命一击 / 醉拳
+static const char* const kPassiveCodes[] = { "AHbh", "AOcr", "Acdb" };
+// 设置技能等级时使用的等级，原版 `push 70`（0x70 = 112，游戏会截断到最高级）
+static const int kMaxAbilityLevel = 0x70;
+
+// JASS 命令 ID（从 1.24E Game.dll 的命令注册表读出：push "innerfire" / push 0D0062 / call 0x3B1270）
+static const int ORDER_INNERFIRE = 852066;      // 0x0D0062
+static const int ORDER_BLOODLUST = 852101;      // 0x0D0085
+static const int ORDER_UNHOLYFRENZY = 852209;   // 0x0D00F1
+static const int ORDER_ROAR = 852164;           // 0x0D00C4
+static const int ORDER_POLYMORPH = 852074;      // 0x0D006A
+
+// ---------------------------------------------------------------------------
+// 执行结果
+// ---------------------------------------------------------------------------
+struct CommandResult {
+	int code;
+	wchar_t text[160];
+};
+
+static void ResultSet(CommandResult& r, int code, const wchar_t* format, ...) {
+	r.code = code;
+	va_list args;
+	va_start(args, format);
+	_vsnwprintf(r.text, 159, format, args);
+	va_end(args);
+	r.text[159] = 0;
+}
+
+// ---------------------------------------------------------------------------
+// 运行时状态
+// ---------------------------------------------------------------------------
+struct PendingRemoval {
+	handle unit;
+	DWORD deadline;
+};
+static std::vector<PendingRemoval> DummyUnits;     // 等待删除的施法单位
+static std::set<handle> NoCollisionUnits;          // 已关闭碰撞体积的单位
+static bool GamePausedByTrainer = false;
+static DWORD LastSelectionRefresh = 0;
+static bool MultiplayerWarned = false;
+
+// ---------------------------------------------------------------------------
+// 基础操作
+// ---------------------------------------------------------------------------
+
+// 游戏中的真人玩家数（控制者为用户且槽位正在游戏）
+static int HumanPlayersCount() {
+	int count = 0;
+	for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
+		handle p = Player(i);
+		if (!p) continue;
+		if (GetPlayerController(p) == MAP_CONTROL_USER && GetPlayerSlotState(p) == PLAYER_SLOT_STATE_PLAYING) ++count;
+	}
+	return count;
+}
+
+// 本地玩家当前选中的第一个单位 [124E mycall_GetSelectUnit]
+static handle SelectedUnitGet() {
+	handle group = CreateGroup();
+	if (!group) return 0;
+	GroupEnumUnitsSelected(group, GetLocalPlayer(), 0);
+	handle unit = FirstOfGroup(group);
+	DestroyGroup(group);
+	return unit;
+}
+
+static void CodeText(int code, wchar_t out[5]) { W3T_FourCCToText((DWORD)code, out); }
+
+// 内部函数添加技能（原版 InGame_UnitAddAbitily），可以重复添加同一技能
+static bool AbilityAddInternal(handle unit, int abilityId) {
+	void* fn = Offset(UNIT_ADD_ABILITY_INTERNAL);
+	if (!fn) return false;
+	void* object = UnitObjectGet(unit);
+	if (!object) return false;
+	// [124E+0880]: push 0 / push 0 / push 0 / mov edx,技能ID / mov ecx,单位对象 / call InGame_UnitAddAbitily
+	aero::generic_fast_call<void>(fn, object, abilityId, 0, 0, 0);
+	return true;
+}
+
+// 用隐形施法单位对目标施放一个技能（全BUFF / 变绵羊）
+// abilityCodes 依次尝试（野怪版本没有科技需求，优先使用），dummyTypes 依次尝试（需要有魔法值的单位）
+// IssueTargetOrderById 在“魔法不足 / 目标不合法 / 技能不可用”时同步返回 false，可据此换下一种组合
+static bool CastWithDummy(handle owner, handle target, const char* const* abilityCodes, int codeCount,
+	int orderId, bool immediate) {
+	static const char* const kDummyTypes[] = { "hsor", "hmpr", "oshm", "unec", "edoc" };
+	float x = GetUnitX(target);
+	float y = GetUnitY(target);
+	for (size_t t = 0; t < sizeof(kDummyTypes) / sizeof(kDummyTypes[0]); ++t) {
+		handle dummy = CreateUnit(owner, FourCC(kDummyTypes[t]), x, y, 0.0f);
+		if (!dummy) continue;
+		SetUnitVertexColor(dummy, 255, 255, 255, 0);    // 完全透明
+		UnitAddAbility(dummy, FourCC("Aloc"));          // 蝗虫：不可选中、不可攻击
+		SetUnitPathing(dummy, 0);
+		for (int c = 0; c < codeCount; ++c) {
+			int code = FourCC(abilityCodes[c]);
+			if (!UnitAddAbility(dummy, code)) continue;
+			SetUnitAbilityLevel(dummy, code, 1);
+			SetUnitState(dummy, UNIT_STATE_MANA, GetUnitState(dummy, UNIT_STATE_MAX_MANA));
+			bool issued = immediate ? IssueImmediateOrderById(dummy, orderId) : IssueTargetOrderById(dummy, orderId, target);
+			if (issued) {
+				PendingRemoval pr = { dummy, GetTickCount() + 3000 };
+				DummyUnits.push_back(pr);
+				return true;
+			}
+			UnitRemoveAbility(dummy, code);
+		}
+		RemoveUnit(dummy);
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// 命令属性
+// ---------------------------------------------------------------------------
+enum {
+	NEED_SELECTION = 0x1,   // 需要选中单位
+	NEED_MOUSE = 0x2,       // 需要鼠标地图坐标
+	NEED_HERO = 0x4         // 选中单位必须是英雄
+};
+
+static int CommandFlags(int cmd) {
+	switch (cmd) {
+	case CMD_HERO_LEVELUP: return NEED_SELECTION | NEED_HERO;
+	case CMD_TELEPORT: return NEED_SELECTION | NEED_MOUSE;
+	case CMD_CLONE_SELF: return NEED_SELECTION | NEED_MOUSE;
+	case CMD_CLONE: return NEED_SELECTION | NEED_MOUSE;
+	case CMD_CLONE_MANY: return NEED_SELECTION | NEED_MOUSE;
+	case CMD_COPY_ITEMS: return NEED_SELECTION | NEED_MOUSE;
+	case CMD_KILL: case CMD_INVULNERABLE: case CMD_VULNERABLE: case CMD_RESET_COOLDOWN:
+	case CMD_DROP_ITEMS: case CMD_SET_CHARGES: case CMD_SET_SCALE: case CMD_FULL_CONTROL:
+	case CMD_PAUSE_UNIT: case CMD_NO_COLLISION: case CMD_KILL_PLAYER_UNITS:
+	case CMD_ADD_ABILITY: case CMD_REMOVE_ABILITY: case CMD_ALL_AURAS: case CMD_ALL_PASSIVES:
+	case CMD_ALL_BUFFS: case CMD_POLYMORPH: case CMD_OVERLAP_ABILITY: case CMD_GIVE_ARTIFACTS:
+		return NEED_SELECTION;
+	case CMD_ADD_ATTRIBUTES: case CMD_SKILL_POINTS:
+		return NEED_SELECTION | NEED_HERO;
+	case CMD_CREATE_ITEM: case CMD_CREATE_ALL_ITEMS: case CMD_SUMMON:
+		return NEED_MOUSE;
+	default:
+		return 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 各命令实现（在 SafeRun 内调用）
+// ---------------------------------------------------------------------------
+static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
+	const int cmd = slot.cmd;
+	const int flags = CommandFlags(cmd);
+	handle unit = 0;
+	float mx = 0.0f, my = 0.0f;
+	wchar_t code[5];
+
+	if (flags & NEED_SELECTION) {
+		unit = SelectedUnitGet();
+		if (!unit) { ResultSet(r, RES_NO_SELECTION, L"请先在游戏里框选一个单位"); return; }
+		if ((flags & NEED_HERO) && !IsUnitType(unit, UNIT_TYPE_HERO)) {
+			ResultSet(r, RES_FAILED, L"选中的单位不是英雄"); return;
+		}
+	}
+	if (flags & NEED_MOUSE) {
+		if (!MouseWorldPosGet(mx, my)) { ResultSet(r, RES_FAILED, L"读取鼠标地图坐标失败，请把鼠标移到地图上再按快捷键"); return; }
+	}
+
+	switch (cmd) {
+	// ================= 单位 =================
+	case CMD_HERO_LEVELUP: {   // [124E+0200]：取当前等级，循环 SetHeroLevel(单位, 等级+1, true)
+		int levels = slot.iarg;
+		if (levels < 1) levels = 1;
+		if (levels > 100000) levels = 100000;
+		int before = GetHeroLevel(unit);
+		if (levels <= 20) {
+			for (int i = 1; i <= levels; ++i) SetHeroLevel(unit, before + i, 1);
+		} else {
+			SetHeroLevel(unit, before + levels, 1);
+		}
+		int after = GetHeroLevel(unit);
+		if (after > before) ResultSet(r, RES_OK, L"英雄等级 %d → %d", before, after);
+		else ResultSet(r, RES_FAILED, L"英雄已到最高等级 %d（可打开“英雄最大等级”开关）", before);
+		break;
+	}
+	case CMD_TELEPORT:         // [124E+0280]：SetUnitPosition(单位, 鼠标X, 鼠标Y)
+		SetUnitPosition(unit, mx, my);
+		ResultSet(r, RES_OK, L"已移动到 (%.0f, %.0f)", mx, my);
+		break;
+	case CMD_KILL:             // [124E+0300]
+		KillUnit(unit);
+		ResultSet(r, RES_OK, L"已杀死目标单位");
+		break;
+	case CMD_INVULNERABLE:     // [124E+0480]
+		SetUnitInvulnerable(unit, 1);
+		ResultSet(r, RES_OK, L"选中单位已无敌");
+		break;
+	case CMD_VULNERABLE:       // [124E+0500]
+		SetUnitInvulnerable(unit, 0);
+		ResultSet(r, RES_OK, L"已取消无敌");
+		break;
+	case CMD_RESET_COOLDOWN:   // [124E+0580]
+		UnitResetCooldown(unit);
+		ResultSet(r, RES_OK, L"技能CD已重置");
+		break;
+	case CMD_CLONE_SELF: {     // [124E+0600]：CreateUnit(本地玩家, 单位类型, 鼠标坐标)
+		int typeId = GetUnitTypeId(unit);
+		handle created = CreateUnit(GetLocalPlayer(), typeId, mx, my, GetUnitFacing(unit));
+		CodeText(typeId, code);
+		ResultSet(r, created ? RES_OK : RES_FAILED, created ? L"已复制 %ls 给自己" : L"复制 %ls 失败", code);
+		break;
+	}
+	case CMD_CLONE: {          // [124E+0900]：CreateUnitAtLoc(原主人, 单位类型, 鼠标位置)
+		int typeId = GetUnitTypeId(unit);
+		handle created = CreateUnit(GetOwningPlayer(unit), typeId, mx, my, GetUnitFacing(unit));
+		CodeText(typeId, code);
+		ResultSet(r, created ? RES_OK : RES_FAILED, created ? L"已复制 %ls" : L"复制 %ls 失败", code);
+		break;
+	}
+	case CMD_CLONE_MANY: {     // [124E+0B00]：复制 copycounter 个（给原主人，用于刷杀敌数）
+		int count = slot.iarg;
+		if (count < 1) count = 1;
+		if (count > 500) count = 500;
+		int typeId = GetUnitTypeId(unit);
+		handle owner = GetOwningPlayer(unit);
+		float face = GetUnitFacing(unit);
+		int made = 0;
+		for (int i = 0; i < count; ++i) if (CreateUnit(owner, typeId, mx, my, face)) ++made;
+		CodeText(typeId, code);
+		ResultSet(r, made ? RES_OK : RES_FAILED, L"已复制 %d 个 %ls", made, code);
+		break;
+	}
+	case CMD_COPY_ITEMS: {     // [124E+0680]：背包 6 格逐格取物品类型，在鼠标位置 CreateItem
+		int made = 0;
+		for (int i = 0; i < 6; ++i) {
+			handle item = UnitItemInSlot(unit, i);
+			if (item && CreateItem(GetItemTypeId(item), mx, my)) ++made;
+		}
+		ResultSet(r, made ? RES_OK : RES_FAILED, made ? L"已复制 %d 件物品到鼠标位置" : L"背包里没有物品", made);
+		break;
+	}
+	case CMD_DROP_ITEMS: {     // [124E+0800]：从第 6 格到第 1 格 UnitRemoveItemFromSlot
+		int dropped = 0;
+		for (int i = 5; i >= 0; --i) if (UnitRemoveItemFromSlot(unit, i)) ++dropped;
+		ResultSet(r, RES_OK, L"已丢弃 %d 件物品", dropped);
+		break;
+	}
+	case CMD_SET_CHARGES: {    // [124E+0780]：第 1 格物品 SetItemCharges(物品, 数量)
+		handle item = UnitItemInSlot(unit, 0);
+		if (!item) { ResultSet(r, RES_FAILED, L"背包第 1 格没有物品"); break; }
+		SetItemCharges(item, slot.iarg);
+		ResultSet(r, RES_OK, L"第 1 格物品数量设为 %d", slot.iarg);
+		break;
+	}
+	case CMD_SET_SCALE: {      // [124E+0700]：SetUnitScale(单位, s, s, s)
+		float s = slot.farg;
+		if (!(s >= 0.05f && s <= 20.0f)) { ResultSet(r, RES_FAILED, L"大小需在 0.05 ~ 20 之间"); break; }
+		SetUnitScale(unit, s, s, s);
+		ResultSet(r, RES_OK, L"单位大小设为 %.2f", s);
+		break;
+	}
+	case CMD_FULL_CONTROL: {   // [124E+0980]：SetPlayerAlliance(所属玩家, 本地玩家, 6/7, true)
+		handle owner = GetOwningPlayer(unit);
+		handle local = GetLocalPlayer();
+		if (owner == local) { ResultSet(r, RES_FAILED, L"这已经是你自己的单位"); break; }
+		SetPlayerAlliance(owner, local, ALLIANCE_SHARED_CONTROL, 1);
+		SetPlayerAlliance(owner, local, ALLIANCE_SHARED_ADVANCED_CONTROL, 1);
+		ResultSet(r, RES_OK, L"已获得玩家 %d 的完全控制权", GetPlayerId(owner) + 1);
+		break;
+	}
+	case CMD_PAUSE_UNIT: {     // [127A] 暂停单位
+		bool paused = IsUnitPaused(unit);
+		PauseUnit(unit, paused ? 0 : 1);
+		ResultSet(r, RES_OK, paused ? L"单位已恢复" : L"单位已暂停");
+		break;
+	}
+	case CMD_NO_COLLISION: {   // [127A] 无视碰撞体积
+		bool off = NoCollisionUnits.count(unit) != 0;
+		SetUnitPathing(unit, off ? 1 : 0);
+		if (off) NoCollisionUnits.erase(unit); else NoCollisionUnits.insert(unit);
+		ResultSet(r, RES_OK, off ? L"已恢复碰撞体积" : L"已无视碰撞体积（再按一次恢复）");
+		break;
+	}
+	case CMD_KILL_PLAYER_UNITS: {  // [127A] 秒杀玩家的所有单位
+		handle owner = GetOwningPlayer(unit);
+		if (owner == GetLocalPlayer()) { ResultSet(r, RES_FAILED, L"选中的是你自己的单位，已取消（请选中对方的单位）"); break; }
+		handle group = CreateGroup();
+		if (!group) { ResultSet(r, RES_FAILED, L"创建单位组失败"); break; }
+		GroupEnumUnitsOfPlayer(group, owner, 0);
+		int killed = 0;
+		for (int guard = 0; guard < 8192; ++guard) {
+			handle u = FirstOfGroup(group);
+			if (!u) break;
+			KillUnit(u);
+			GroupRemoveUnit(group, u);
+			++killed;
+		}
+		DestroyGroup(group);
+		ResultSet(r, RES_OK, L"已秒杀玩家 %d 的 %d 个单位", GetPlayerId(owner) + 1, killed);
+		break;
+	}
+
+	// ================= 英雄 / 技能 =================
+	case CMD_ADD_ABILITY: {    // [124E+0880]：内部函数添加 + SetUnitAbilityLevel(…, 0x70)
+		int id = slot.iarg;
+		CodeText(id, code);
+		bool added = UnitAddAbility(unit, id);
+		if (!added) added = AbilityAddInternal(unit, id);   // 原生函数拒绝（已有同名技能等）时，按原版用内部函数强制添加
+		SetUnitAbilityLevel(unit, id, kMaxAbilityLevel);
+		ResultSet(r, added ? RES_OK : RES_FAILED, added ? L"已添加技能 %ls" : L"添加技能 %ls 失败（代码无效？）", code);
+		break;
+	}
+	case CMD_REMOVE_ABILITY: { // [124E+0E00]：UnitRemoveAbility
+		int id = slot.iarg;
+		CodeText(id, code);
+		bool removed = UnitRemoveAbility(unit, id);
+		ResultSet(r, removed ? RES_OK : RES_FAILED, removed ? L"已删除技能 %ls" : L"单位没有技能 %ls", code);
+		break;
+	}
+	case CMD_ALL_AURAS: {      // [124E+0E20]
+		for (size_t i = 0; i < sizeof(kAuraCodes) / sizeof(kAuraCodes[0]); ++i) {
+			int id = FourCC(kAuraCodes[i]);
+			UnitAddAbility(unit, id);
+			SetUnitAbilityLevel(unit, id, kMaxAbilityLevel);
+		}
+		UnitAddAbility(unit, FourCC(kAuraNoLevel));
+		ResultSet(r, RES_OK, L"已添加全部光环");
+		break;
+	}
+	case CMD_ALL_PASSIVES: {   // [124E+0F50]
+		UnitAddAbility(unit, FourCC("AInv"));
+		for (size_t i = 0; i < sizeof(kPassiveCodes) / sizeof(kPassiveCodes[0]); ++i) {
+			int id = FourCC(kPassiveCodes[i]);
+			UnitAddAbility(unit, id);
+			SetUnitAbilityLevel(unit, id, kMaxAbilityLevel);
+		}
+		ResultSet(r, RES_OK, L"已添加全部被动（重击 / 致命一击 / 醉拳）");
+		break;
+	}
+	case CMD_ALL_BUFFS: {      // [120E+1280] 心灵之火 / 嗜血 / 邪恶狂热 / 咆哮
+		// 原版直接构造 CAbility 对象调用虚函数，版本间虚表不同、1.24E 原版已删除该功能；
+		// 这里改用隐形施法单位，所有调用都是 JASS 原生函数，全版本通用。
+		static const char* const kInnerFire[] = { "ACif", "Ainf" };
+		static const char* const kBloodlust[] = { "ACbl", "Ablo" };
+		static const char* const kUnholy[] = { "ACuf", "Auhf" };
+		static const char* const kRoar[] = { "ACro", "Aroa" };
+		handle owner = GetOwningPlayer(unit);
+		int ok = 0;
+		ok += CastWithDummy(owner, unit, kInnerFire, 2, ORDER_INNERFIRE, false) ? 1 : 0;
+		ok += CastWithDummy(owner, unit, kBloodlust, 2, ORDER_BLOODLUST, false) ? 1 : 0;
+		ok += CastWithDummy(owner, unit, kUnholy, 2, ORDER_UNHOLYFRENZY, false) ? 1 : 0;
+		ok += CastWithDummy(owner, unit, kRoar, 2, ORDER_ROAR, true) ? 1 : 0;
+		ResultSet(r, ok ? RES_OK : RES_FAILED, L"已施放 %d/4 个增益（心灵之火 / 嗜血 / 邪恶狂热 / 咆哮）", ok);
+		break;
+	}
+	case CMD_POLYMORPH: {      // [120E+1300] 变绵羊
+		static const char* const kPoly[] = { "ACpy", "Aply" };
+		handle owner = GetOwningPlayer(unit);
+		// 施法单位必须是目标的敌人：默认用中立敌对玩家，目标本身是中立敌对时用本地玩家
+		handle caster = Player(PLAYER_NEUTRAL_AGGRESSIVE);
+		if (owner == caster) caster = GetLocalPlayer();
+		bool ok = CastWithDummy(caster, unit, kPoly, 2, ORDER_POLYMORPH, false);
+		ResultSet(r, ok ? RES_OK : RES_FAILED, ok ? L"咩~ 已变成绵羊" : L"变羊失败（英雄 / 魔免单位不能被变形）");
+		break;
+	}
+	case CMD_ADD_ATTRIBUTES: { // [127A] 设置属性
+		int n = slot.iarg;
+		SetHeroStr(unit, GetHeroStr(unit, 0) + n, 1);
+		SetHeroAgi(unit, GetHeroAgi(unit, 0) + n, 1);
+		SetHeroInt(unit, GetHeroInt(unit, 0) + n, 1);
+		ResultSet(r, RES_OK, L"力量 / 敏捷 / 智力各增加 %d", n);
+		break;
+	}
+	case CMD_SKILL_POINTS: {   // [127A] 增加技能点数
+		bool ok = UnitModifySkillPoints(unit, slot.iarg);
+		ResultSet(r, ok ? RES_OK : RES_FAILED, ok ? L"技能点数增加 %d" : L"增加技能点数失败", slot.iarg);
+		break;
+	}
+	case CMD_OVERLAP_ABILITY: { // [120E+1200]：内部函数重复添加 10 次 + SetUnitAbilityLevel(…, 0x70)
+		int id = slot.iarg;
+		CodeText(id, code);
+		if (!Offset(UNIT_ADD_ABILITY_INTERNAL)) { ResultSet(r, RES_UNSUPPORTED, L"当前版本没有内部添加技能函数，无法重叠技能"); break; }
+		int added = 0;
+		for (int i = 0; i < 10; ++i) {
+			if (AbilityAddInternal(unit, id)) ++added;
+			SetUnitAbilityLevel(unit, id, kMaxAbilityLevel);
+		}
+		ResultSet(r, added ? RES_OK : RES_FAILED, L"技能 %ls 已重叠添加 %d 次", code, added);
+		break;
+	}
+
+	// ================= 物品 / 资源 / 科技 =================
+	case CMD_GIVE_ARTIFACTS: { // [124E+0FE0]：先加物品栏，4 把瑟拉思尔 + 火焰手套 + 远古战斧
+		UnitAddAbility(unit, FourCC("AInv"));
+		int got = 0;
+		for (int i = 5; i >= 2; --i) got += UnitAddItemToSlotById(unit, FourCC("srtl"), i) ? 1 : 0;
+		got += UnitAddItemToSlotById(unit, FourCC("frhg"), 1) ? 1 : 0;
+		got += UnitAddItemToSlotById(unit, FourCC("klmm"), 0) ? 1 : 0;
+		ResultSet(r, RES_OK, L"已得到 %d 件神器（背包已满的格子会掉在地上）", got);
+		break;
+	}
+	case CMD_CREATE_ITEM: {    // [124E+1100]：CreateItem(物品代码, 鼠标坐标)
+		CodeText(slot.iarg, code);
+		handle item = CreateItem(slot.iarg, mx, my);
+		ResultSet(r, item ? RES_OK : RES_FAILED, item ? L"已创建物品 %ls" : L"创建物品 %ls 失败（代码无效？）", code);
+		break;
+	}
+	case CMD_CREATE_ALL_ITEMS: {   // [120E+1180]：遍历物品数据表，逐个 CreateItem
+		war3::ItemDataHashTable* table = reinterpret_cast<war3::ItemDataHashTable*>(Offset(GLOBAL_ITEMDATA_TABLE));
+		if (!table) { ResultSet(r, RES_UNSUPPORTED, L"当前版本没有物品数据表地址"); break; }
+		int made = 0;
+		war3::ItemDataNode* node = table->firstNode;
+		for (int guard = 0; guard < 4096 && (intptr_t)node > 0; ++guard) {
+			if (node->typeId && CreateItem((int)node->typeId, mx, my)) ++made;
+			node = *reinterpret_cast<war3::ItemDataNode**>(reinterpret_cast<uint8_t*>(node) + table->linkOffset + 4);
+		}
+		ResultSet(r, made ? RES_OK : RES_FAILED, L"已创建 %d 件物品", made);
+		break;
+	}
+	case CMD_MONEY_SELF: {     // [127A] 增加金币木材（只给自己）
+		handle local = GetLocalPlayer();
+		SetPlayerState(local, PLAYER_STATE_RESOURCE_GOLD, slot.iarg);
+		SetPlayerState(local, PLAYER_STATE_RESOURCE_LUMBER, slot.iarg);
+		ResultSet(r, RES_OK, L"金钱和木材设为 %d", slot.iarg);
+		break;
+	}
+	case CMD_MONEY_ALL: {      // [124E+0A80]：玩家 11 到 0 全部设为指定数量
+		for (int i = MAX_PLAYER_SLOTS - 1; i >= 0; --i) {
+			handle p = Player(i);
+			SetPlayerState(p, PLAYER_STATE_RESOURCE_GOLD, slot.iarg);
+			SetPlayerState(p, PLAYER_STATE_RESOURCE_LUMBER, slot.iarg);
+		}
+		ResultSet(r, RES_OK, L"所有玩家的金钱和木材设为 %d", slot.iarg);
+		break;
+	}
+	case CMD_SUMMON: {         // [124E+1080]：CreateUnitAtLoc(本地玩家, 增援代码, 鼠标位置)
+		CodeText(slot.iarg, code);
+		handle created = CreateUnit(GetLocalPlayer(), slot.iarg, mx, my, 270.0f);
+		ResultSet(r, created ? RES_OK : RES_FAILED, created ? L"增援 %ls 已到达" : L"呼叫增援 %ls 失败（代码无效？）", code);
+		break;
+	}
+	case CMD_RESEARCH: {       // [124E+1180]：SetPlayerTechResearched(本地玩家, 科技代码, 0x70)
+		CodeText(slot.iarg, code);
+		SetPlayerTechResearched(GetLocalPlayer(), slot.iarg, kMaxAbilityLevel);
+		ResultSet(r, RES_OK, L"已得到科技 %ls", code);
+		break;
+	}
+	case CMD_XP_RATE: {        // [127A] 增加经验获取率
+		float rate = slot.farg;
+		if (!(rate >= 0.0f && rate <= 1000.0f)) { ResultSet(r, RES_FAILED, L"倍率需在 0 ~ 1000 之间"); break; }
+		SetPlayerHandicapXP(GetLocalPlayer(), rate);
+		ResultSet(r, RES_OK, L"经验获取率设为 %.0f%%", rate * 100.0f);
+		break;
+	}
+
+	// ================= 游戏 =================
+	case CMD_FOG_OFF:          // [124E+0380] MapON
+		FogEnable(0);
+		FogMaskEnable(0);
+		ResultSet(r, RES_OK, L"已关闭战争迷雾");
+		break;
+	case CMD_FOG_ON:           // [124E+0400] MapOFF
+		FogEnable(1);
+		FogMaskEnable(1);
+		ResultSet(r, RES_OK, L"已恢复战争迷雾");
+		break;
+	case CMD_PAUSE_GAME:       // [127A] 暂停游戏 / 恢复游戏
+		GamePausedByTrainer = !GamePausedByTrainer;
+		PauseGame(GamePausedByTrainer ? 1 : 0);
+		ResultSet(r, RES_OK, GamePausedByTrainer ? L"游戏已暂停（再按一次继续）" : L"游戏已继续");
+		break;
+
+	default:
+		ResultSet(r, RES_FAILED, L"未知命令 %d", cmd);
+		break;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 对外接口
+// ---------------------------------------------------------------------------
+static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResult& r) {
+	if (!shm) return;
+	shm->resultCmd = cmd;
+	shm->resultCode = r.code;
+	memcpy(shm->resultText, r.text, sizeof(shm->resultText));
+	InterlockedExchange(&shm->resultSeq, seq);
+	InterlockedIncrement(&shm->resultCounter);
+
+	if (shm->inGameMessages && r.code != RES_NOT_IN_GAME) {
+		// 魔兽内部文字是 UTF-8；先拼宽字符串再统一转换，不依赖编译器的窄字符串编码
+		wchar_t wide[200];
+		_snwprintf(wide, 199, L"|cffffcc00[修改器]|r %ls", r.text);
+		wide[199] = 0;
+		char utf8[600];
+		WideToUtf8(wide, utf8, sizeof(utf8));
+		SafeRun([&] { TextPrint(4.0f, utf8); });
+	}
+}
+
+void Trainer_Execute(W3T_Shared* shm, const W3T_CmdSlot& slot) {
+	CommandResult r;
+	ResultSet(r, RES_OK, L"");
+	bool ran = SafeRun([&] {
+		if (!jass::NativesComplete(NULL)) { ResultSet(r, RES_UNSUPPORTED, L"当前游戏版本的函数表不完整，无法执行"); return; }
+		if (!IsInGame()) { ResultSet(r, RES_NOT_IN_GAME, L"请先进入地图（主菜单 / 读图时不能使用）"); return; }
+		if (HumanPlayersCount() > 1) { ResultSet(r, RES_MULTIPLAYER, L"检测到多人游戏，修改器只能在单人游戏中使用"); return; }
+		CommandRun(slot, r);
+	});
+	if (!ran) {
+		ResultSet(r, RES_EXCEPTION, L"执行时发生异常 %08lX @ %p，已拦截（游戏未受影响）",
+			SafeLastExceptionCode(), SafeLastExceptionAddress());
+	}
+	ResultPublish(shm, slot.seq, slot.cmd, r);
+}
+
+void Trainer_SyncToggles(W3T_Shared* shm) {
+	for (int id = 0; id < TGL_COUNT; ++id) {
+		bool want = shm->toggleWant[id] != 0;
+		bool have = shm->toggleState[id] != 0;
+		int argument = shm->toggleArg[id];
+		if (want == have && !(want && id == TGL_MAX_HERO_LEVEL)) continue;
+
+		CommandResult r;
+		ResultSet(r, RES_OK, L"");
+		bool ok = false;
+		bool ran = SafeRun([&] {
+			if (want) {
+				bool inGame = IsInGame();
+				if (inGame && jass::NativesComplete(NULL) && HumanPlayersCount() > 1) {
+					ResultSet(r, RES_MULTIPLAYER, L"检测到多人游戏，常驻开关只能在单人游戏中使用");
+					return;
+				}
+			}
+			if (id == TGL_NOCD_NOMANA) {        // 不是代码补丁，由定时器维持
+				ok = true;
+				return;
+			}
+			wchar_t reason[160];
+			ok = PatchApply(id, want, argument, reason, 160);
+			if (!ok) ResultSet(r, PatchSupported(id) ? RES_FAILED : RES_UNSUPPORTED, L"%ls", reason[0] ? reason : L"当前版本不支持该开关");
+		});
+		if (!ran) {
+			ResultSet(r, RES_EXCEPTION, L"切换开关时发生异常 %08lX，已拦截", SafeLastExceptionCode());
+		}
+		if (ok) {
+			shm->toggleState[id] = want ? 1 : 0;
+			if (id == TGL_MAX_HERO_LEVEL && want && have) continue;   // 只是更新数值，不提示
+		} else {
+			shm->toggleWant[id] = shm->toggleState[id];             // 失败：界面恢复原状态
+		}
+		static const wchar_t* const kNames[TGL_COUNT] = { L"不会失败", L"娱乐模式", L"允许光环叠加", L"英雄最大等级", L"选中单位无CD无蓝耗" };
+		if (ok) ResultSet(r, RES_OK, L"%ls：%ls", kNames[id], want ? L"已开启" : L"已关闭");
+		ResultPublish(shm, shm->resultSeq, -(id + 1), r);
+	}
+}
+
+void Trainer_Tick(W3T_Shared* shm) {
+	DWORD now = GetTickCount();
+
+	SafeRun([&] {
+		bool complete = jass::NativesComplete(NULL);
+		bool inGame = complete && IsInGame();
+		shm->inGame = inGame ? 1 : 0;
+		if (!inGame) {
+			shm->selValid = 0;
+			DummyUnits.clear();
+			NoCollisionUnits.clear();
+			GamePausedByTrainer = false;
+			MultiplayerWarned = false;
+			return;
+		}
+
+		// 清理到期的施法单位
+		for (size_t i = 0; i < DummyUnits.size();) {
+			if ((LONG)(now - DummyUnits[i].deadline) >= 0) {
+				RemoveUnit(DummyUnits[i].unit);
+				DummyUnits.erase(DummyUnits.begin() + i);
+			} else {
+				++i;
+			}
+		}
+
+		// 每 250ms 刷新一次真人玩家数和选中单位
+		if (now - LastSelectionRefresh < 250) return;
+		LastSelectionRefresh = now;
+
+		int humans = HumanPlayersCount();
+		shm->humanPlayers = humans;
+		shm->localPlayerId = GetPlayerId(GetLocalPlayer());
+
+		// 多人游戏：自动关闭所有常驻开关
+		if (humans > 1) {
+			bool any = false;
+			for (int id = 0; id < TGL_COUNT; ++id) {
+				if (shm->toggleState[id]) any = true;
+				shm->toggleWant[id] = 0;
+			}
+			if (any) {
+				PatchRestoreAll();
+				for (int id = 0; id < TGL_COUNT; ++id) shm->toggleState[id] = 0;
+			}
+			if (any || !MultiplayerWarned) {
+				CommandResult r;
+				ResultSet(r, RES_MULTIPLAYER, any ? L"检测到多人游戏，已自动关闭所有常驻开关" : L"检测到多人游戏，修改器功能已停用");
+				ResultPublish(shm, shm->resultSeq, 0, r);
+				MultiplayerWarned = true;
+			}
+			shm->selValid = 0;
+			return;
+		}
+
+		handle unit = SelectedUnitGet();
+		if (unit) {
+			shm->selTypeId = (DWORD)GetUnitTypeId(unit);
+			shm->selOwnerId = GetPlayerId(GetOwningPlayer(unit));
+			shm->selHeroLevel = IsUnitType(unit, UNIT_TYPE_HERO) ? GetHeroLevel(unit) : 0;
+			shm->selValid = 1;
+		} else {
+			shm->selValid = 0;
+		}
+
+		// 选中单位无CD无蓝耗 [127A 无CD无蓝耗]
+		if (shm->toggleState[TGL_NOCD_NOMANA] && unit) {
+			UnitResetCooldown(unit);
+			SetUnitState(unit, UNIT_STATE_MANA, GetUnitState(unit, UNIT_STATE_MAX_MANA));
+		}
+	});
+}
+
+void Trainer_Shutdown(W3T_Shared* shm) {
+	SafeRun([&] {
+		if (IsInGame()) {
+			for (size_t i = 0; i < DummyUnits.size(); ++i) RemoveUnit(DummyUnits[i].unit);
+			if (GamePausedByTrainer) PauseGame(0);
+		}
+	});
+	DummyUnits.clear();
+	GamePausedByTrainer = false;
+	PatchRestoreAll();
+	if (shm) {
+		for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) {
+			shm->toggleState[id] = 0;
+			shm->toggleWant[id] = 0;
+		}
+	}
+}

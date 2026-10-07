@@ -1,0 +1,10 @@
+[ENABLE]
+game.dll+1b39ce:
+mov eax,0
+game.dll+1b3a9b:
+mov eax,0
+[DISABLE]
+game.dll+1b39ce:
+mov eax,44
+game.dll+1b3a9b:
+mov eax,43-

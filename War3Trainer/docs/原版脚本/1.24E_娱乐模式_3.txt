@@ -1,0 +1,14 @@
+[ENABLE]
+game.dll+2964e6:
+jmp game.dll+2965BF
+game.dll+296533:
+jmp game.dll+2965BF
+game.dll+296580:
+jmp game.dll+2965BF
+[DISABLE]
+game.dll+2964e6:
+jmp game.dll+2965c1
+game.dll+296533:
+jmp game.dll+2965c1
+game.dll+296580:
+jmp game.dll+2965c1
