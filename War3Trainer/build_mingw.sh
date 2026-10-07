@@ -34,8 +34,13 @@ if [ "$1" = "test" ]; then
     $CXX -O2 -shared -static -s -o build/mock/Game.dll tests/mock/FakeGame.cpp build/mock/fakegame.res.o
     $CXX -O2 -mwindows -static -s -o build/mock/war3.exe tests/mock/MockGame.cpp
     $CXX $COMMON -Isrc/gui -o build/mock/linktest.exe tests/linktest.cpp src/gui/GameLink.cpp -ladvapi32
-    $CXX $COMMON -Isrc/gui -o build/mock/patchtest.exe tests/patchtest.cpp src/gui/GameLink.cpp -ladvapi32
     cp bin/War3Trainer.dll build/mock/
+    # 补丁测试用的测试版模块（W3T_TEST_BUILD：允许在没有对局的模拟进程里开启常驻开关），
+    # 与 patchtest.exe 放在单独目录，界面代码按 exe 所在目录查找模块
+    mkdir -p build/mock/patch
+    $CXX $COMMON -DW3T_TEST_BUILD -Iinclude -Isrc/dll -shared -Wl,--exclude-all-symbols \
+        -o build/mock/patch/War3Trainer.dll src/dll/*.cpp -lversion -luser32
+    $CXX $COMMON -Isrc/gui -o build/mock/patch/patchtest.exe tests/patchtest.cpp src/gui/GameLink.cpp -ladvapi32
 fi
 
 echo "完成：bin/War3Trainer.exe  bin/War3Trainer.dll"

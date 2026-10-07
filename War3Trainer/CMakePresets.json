@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "x86-Release",
+      "displayName": "x86-Release",
+      "description": "32 位 Release（魔兽争霸 III 是 32 位程序）",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": { "value": "x86", "strategy": "external" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "vendor": { "microsoft.com/VisualStudioSettings/CMake/1.0": { "hostOS": [ "Windows" ] } }
+    },
+    {
+      "name": "x86-Debug",
+      "displayName": "x86-Debug",
+      "description": "32 位 Debug",
+      "inherits": "x86-Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "x86-Release", "configurePreset": "x86-Release" },
+    { "name": "x86-Debug", "configurePreset": "x86-Debug" }
+  ]
+}

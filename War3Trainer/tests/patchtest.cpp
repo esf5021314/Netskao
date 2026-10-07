@@ -1,6 +1,7 @@
 ﻿// 模块说明：
 // 补丁引擎测试（控制台）。配合以“真实 1.24E Game.dll”启动的模拟进程使用：
-//   MockGame.exe <1.24E Game.dll 路径>   然后运行 patchtest.exe
+//   MockGame.exe <1.24E Game.dll 路径>   然后运行 build/mock/patch/patchtest.exe
+// 同目录的 War3Trainer.dll 是测试版（W3T_TEST_BUILD）：模拟进程里没有对局，测试版允许在游戏外开启开关。
 // 逐个打开 / 关闭常驻开关，用 ReadProcessMemory 读回补丁处字节，确认写入与还原都正确；
 // “英雄最大等级”打开后通过测试消息调用被挂钩的 GetMiscInt，确认返回设定值。
 #include "../src/gui/stdafx.h"

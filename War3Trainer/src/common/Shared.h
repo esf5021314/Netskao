@@ -8,8 +8,8 @@
 //       界面程序打开同一块共享内存，双方都映射为 W3T_Shared 结构。
 //    2. 界面把命令写进环形命令槽 ring[seq % W3T_CMD_RING]，然后
 //       PostMessage(魔兽窗口, RegisterWindowMessage(W3T_MSG_NAME), W3T_WP_COMMAND, seq)
-//    3. 注入模块子类化了魔兽窗口，在窗口过程（= 游戏主线程）里收到消息后执行命令，
-//       把结果写回 resultSeq / resultText。
+//    3. 注入模块在魔兽主线程上安装了消息钩子（WH_GETMESSAGE），主线程取出这条消息时
+//       （= 游戏主线程）执行命令，把结果写进 results[] 环形结果区。
 //
 //  原版 CE 脚本是 Hook 一个每帧调用的函数来轮询“信箱”（tablekey）；这里改为窗口消息，
 //  不需要为每个版本找 Hook 点，全版本通用。
@@ -19,10 +19,10 @@
 
 #include <windows.h>
 
-#define W3T_ABI_VERSION        3u
-#define W3T_SHARED_MAGIC       0x33543357u                  // 'W3T3'
+#define W3T_ABI_VERSION        4u                           // 结构有变化时递增
+#define W3T_SHARED_MAGIC       0x52543357u                  // 'W3TR'，各版本不变，版本差异由 abiVersion 区分
 #define W3T_SHM_NAME_FMT       L"Local\\War3Trainer_Shm_%lu" // %lu = 游戏进程 PID
-#define W3T_MSG_NAME           L"War3Trainer.Command.v3"    // RegisterWindowMessage 名称
+#define W3T_MSG_NAME           L"War3Trainer.Command"       // RegisterWindowMessage 名称
 #define W3T_DLL_NAME           L"War3Trainer.dll"
 
 // ---- 窗口消息的 wParam ------------------------------------------------------
@@ -67,8 +67,8 @@ enum W3T_CommandId {
     CMD_SKILL_POINTS,       // 增加技能点数        iarg = 点数
     CMD_OVERLAP_ABILITY,    // 重叠技能（重复添加10次）iarg = 技能代码
 
-    // 物品 / 资源 / 科技（不需要选中单位）
-    CMD_GIVE_ARTIFACTS,     // 得到6个神器
+    // 物品 / 资源 / 科技（除 CMD_GIVE_ARTIFACTS 外不需要选中单位）
+    CMD_GIVE_ARTIFACTS,     // 得到6个神器（给选中单位，需要选中）
     CMD_CREATE_ITEM,        // 得到物品            iarg = 物品代码
     CMD_CREATE_ALL_ITEMS,   // 创建所有物品
     CMD_MONEY_SELF,         // 设置钱和木（自己）  iarg = 数量
@@ -125,6 +125,7 @@ enum W3T_DllState {
 #define W3T_SUPPORT_VERIFIED  0x80u   // 本版本已逐条反汇编核对
 
 #define W3T_CMD_RING 32
+#define W3T_RESULT_RING 16
 
 #pragma pack(push, 4)
 
@@ -133,6 +134,15 @@ struct W3T_CmdSlot {
     LONG  cmd;              // W3T_CommandId
     LONG  iarg;             // 整数参数（等级 / 数量 / 4字符代码）
     float farg;             // 浮点参数（缩放 / 倍率）
+};
+
+// 一条执行结果（模块写，界面读）
+struct W3T_ResultEntry {
+    volatile LONG counter;  // 等于该结果的序号；写入过程中为 0（界面按顺序锁方式读取）
+    LONG    seq;            // 对应的命令序号
+    LONG    cmd;            // 命令（负数 = 开关 -(TGL_xxx+1)，0 = 自动提示）
+    LONG    code;           // W3T_Result
+    wchar_t text[160];
 };
 
 struct W3T_Shared {
@@ -161,6 +171,8 @@ struct W3T_Shared {
     LONG    selHeroLevel;               // 英雄等级（非英雄为 0）
 
     volatile LONG resultCounter;        // 每发布一条结果 +1（命令、开关切换、自动提示都会发布）
+    W3T_ResultEntry results[W3T_RESULT_RING];   // 最近 16 条结果，results[n % 16] 是第 n 条
+    // 以下 4 项是最近一条结果的副本，便于简单读取
     volatile LONG resultSeq;            // 最近一次执行的命令序号
     LONG    resultCmd;                  // 最近一次执行的命令（负数 = 开关 -(TGL_xxx+1)，0 = 自动提示）
     LONG    resultCode;                 // W3T_Result

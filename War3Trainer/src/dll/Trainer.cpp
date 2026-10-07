@@ -19,7 +19,7 @@
 #include "Patch.h"
 #include "SafeCall.h"
 #include <vector>
-#include <set>
+#include <map>
 
 using namespace jass;
 
@@ -63,15 +63,38 @@ static void ResultSet(CommandResult& r, int code, const wchar_t* format, ...) {
 // ---------------------------------------------------------------------------
 // 运行时状态
 // ---------------------------------------------------------------------------
-struct PendingRemoval {
+// 单位句柄会被游戏回收再分配给别的单位，所以记录句柄时同时记录单位对象和类型，
+// 使用前核对，避免误删 / 误改另一个单位
+struct UnitRef {
 	handle unit;
-	DWORD deadline;
+	void* object;           // UnitObjectGet(unit)
+	int typeId;
+};
+struct PendingRemoval {
+	UnitRef ref;
+	DWORD created;          // 创建时间
+	DWORD deadline;         // 最长保留时间（施法完成后会提前删除）
 };
 static std::vector<PendingRemoval> DummyUnits;     // 等待删除的施法单位
-static std::set<handle> NoCollisionUnits;          // 已关闭碰撞体积的单位
+static std::map<handle, UnitRef> NoCollisionUnits; // 已关闭碰撞体积的单位
 static bool GamePausedByTrainer = false;
 static DWORD LastSelectionRefresh = 0;
 static bool MultiplayerWarned = false;
+static void* LastGameObject = NULL;                // 用来发现“换图 / 重新开始”
+
+// 娱乐模式的人口部分（见 FoodCeilingApply）
+static bool FoodApplied = false;
+static int FoodCacheSaved = -1;
+static int FoodPlayerSaved[jass::MAX_PLAYER_SLOTS];
+
+// 常驻开关只能在单人游戏进行中开启，离开游戏自动关闭。
+// 测试版模块（build_mingw.sh test 定义 W3T_TEST_BUILD，只给 tests/patchtest 用）运行在没有对局的
+// 模拟进程里，放开这一限制，用来逐字节检查补丁的写入与还原。正式版本不定义此宏。
+#ifdef W3T_TEST_BUILD
+static const bool kTogglesNeedGame = false;
+#else
+static const bool kTogglesNeedGame = true;
+#endif
 
 // ---------------------------------------------------------------------------
 // 基础操作
@@ -100,15 +123,27 @@ static handle SelectedUnitGet() {
 
 static void CodeText(int code, wchar_t out[5]) { W3T_FourCCToText((DWORD)code, out); }
 
+static UnitRef UnitRefMake(handle unit) {
+	UnitRef ref = { unit, UnitObjectGet(unit), GetUnitTypeId(unit) };
+	return ref;
+}
+
+// 句柄仍然指向记录时的同一个单位
+static bool UnitRefValid(const UnitRef& ref) {
+	if (!ref.unit || !ref.object) return false;
+	return UnitObjectGet(ref.unit) == ref.object && GetUnitTypeId(ref.unit) == ref.typeId;
+}
+
 // 内部函数添加技能（原版 InGame_UnitAddAbitily），可以重复添加同一技能
+// 返回新建的 CAbility*；技能代码无效时返回 0（1.24E 0x24D92E: xor eax,eax / ret 0Ch）
 static bool AbilityAddInternal(handle unit, int abilityId) {
 	void* fn = Offset(UNIT_ADD_ABILITY_INTERNAL);
 	if (!fn) return false;
 	void* object = UnitObjectGet(unit);
 	if (!object) return false;
 	// [124E+0880]: push 0 / push 0 / push 0 / mov edx,技能ID / mov ecx,单位对象 / call InGame_UnitAddAbitily
-	aero::generic_fast_call<void>(fn, object, abilityId, 0, 0, 0);
-	return true;
+	void* ability = aero::generic_fast_call<void*>(fn, object, abilityId, 0, 0, 0);
+	return ability != NULL;
 }
 
 // 用隐形施法单位对目标施放一个技能（全BUFF / 变绵羊）
@@ -124,23 +159,71 @@ static bool CastWithDummy(handle owner, handle target, const char* const* abilit
 		if (!dummy) continue;
 		SetUnitVertexColor(dummy, 255, 255, 255, 0);    // 完全透明
 		UnitAddAbility(dummy, FourCC("Aloc"));          // 蝗虫：不可选中、不可攻击
+		UnitRemoveAbility(dummy, FourCC("Aatk"));       // 去掉攻击，不会自动攻击附近的单位
 		SetUnitPathing(dummy, 0);
+		bool casterReady = false;                       // 技能加上了且有魔法值：失败只能是目标的原因
 		for (int c = 0; c < codeCount; ++c) {
 			int code = FourCC(abilityCodes[c]);
 			if (!UnitAddAbility(dummy, code)) continue;
 			SetUnitAbilityLevel(dummy, code, 1);
 			SetUnitState(dummy, UNIT_STATE_MANA, GetUnitState(dummy, UNIT_STATE_MAX_MANA));
+			if (GetUnitState(dummy, UNIT_STATE_MAX_MANA) > 0.0f) casterReady = true;
 			bool issued = immediate ? IssueImmediateOrderById(dummy, orderId) : IssueTargetOrderById(dummy, orderId, target);
 			if (issued) {
-				PendingRemoval pr = { dummy, GetTickCount() + 3000 };
+				PendingRemoval pr;
+				pr.ref = UnitRefMake(dummy);
+				pr.created = GetTickCount();
+				pr.deadline = pr.created + 30000;
 				DummyUnits.push_back(pr);
 				return true;
 			}
 			UnitRemoveAbility(dummy, code);
 		}
 		RemoveUnit(dummy);
+		if (casterReady) return false;      // 目标不合法（英雄 / 魔免等），换施法单位也没用
 	}
 	return false;
+}
+
+// 娱乐模式的人口部分即时生效 / 即时还原
+// GetFoodCeiling 只在读图时计算一次并缓存（[GLOBAL_FOOD_CEILING_CACHE]），并复制到每个玩家的
+// PLAYER_STATE_FOOD_CAP_CEILING；只改代码不会影响已经开始的游戏，所以这里同时改缓存和玩家状态。
+static void FoodCeilingApply(bool enable) {
+	int* cache = reinterpret_cast<int*>(Offset(GLOBAL_FOOD_CEILING_CACHE));
+	if (enable) {
+		if (FoodApplied) return;
+		// 先全部保存再修改：中途出错时，已改动的部分也能在关闭时还原
+		for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
+			FoodPlayerSaved[i] = GetPlayerState(Player(i), PLAYER_STATE_FOOD_CAP_CEILING);
+		}
+		if (cache) FoodCacheSaved = *cache;
+		FoodApplied = true;
+		if (cache) *cache = 65535;
+		for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
+			SetPlayerState(Player(i), PLAYER_STATE_FOOD_CAP_CEILING, 65535);
+		}
+	} else {
+		if (!FoodApplied) return;
+		if (cache) *cache = FoodCacheSaved;
+		for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
+			SetPlayerState(Player(i), PLAYER_STATE_FOOD_CAP_CEILING, FoodPlayerSaved[i]);
+		}
+		FoodApplied = false;
+	}
+}
+
+// 关闭全部常驻开关。inGame = false 时游戏对象已经不在，只还原代码字节：
+// 人口缓存会在下一次读图时由游戏重置为 -1 重新计算，不能写回旧值
+static void TogglesRestoreAll(W3T_Shared* shm, bool inGame) {
+	if (inGame) SafeRun([&] { FoodCeilingApply(false); });
+	FoodApplied = false;
+	PatchRestoreAll();
+	if (shm) {
+		for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) {
+			shm->toggleState[id] = 0;
+			shm->toggleWant[id] = 0;
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -305,9 +388,11 @@ static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
 		break;
 	}
 	case CMD_NO_COLLISION: {   // [127A] 无视碰撞体积
-		bool off = NoCollisionUnits.count(unit) != 0;
+		// 记录里的句柄必须仍是同一个单位（句柄会被回收），否则视为“未关闭”
+		std::map<handle, UnitRef>::iterator it = NoCollisionUnits.find(unit);
+		bool off = it != NoCollisionUnits.end() && UnitRefValid(it->second);
 		SetUnitPathing(unit, off ? 1 : 0);
-		if (off) NoCollisionUnits.erase(unit); else NoCollisionUnits.insert(unit);
+		if (off) NoCollisionUnits.erase(it); else NoCollisionUnits[unit] = UnitRefMake(unit);
 		ResultSet(r, RES_OK, off ? L"已恢复碰撞体积" : L"已无视碰撞体积（再按一次恢复）");
 		break;
 	}
@@ -317,15 +402,22 @@ static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
 		handle group = CreateGroup();
 		if (!group) { ResultSet(r, RES_FAILED, L"创建单位组失败"); break; }
 		GroupEnumUnitsOfPlayer(group, owner, 0);
-		int killed = 0;
+		// 先把单位全部取出再动手：边杀边取时，死亡触发器移除的单位会成为组里的“空位”，
+		// FirstOfGroup 遇到它就返回 0，循环会提前结束
+		std::vector<UnitRef> units;
 		for (int guard = 0; guard < 8192; ++guard) {
 			handle u = FirstOfGroup(group);
 			if (!u) break;
-			KillUnit(u);
+			units.push_back(UnitRefMake(u));
 			GroupRemoveUnit(group, u);
-			++killed;
 		}
 		DestroyGroup(group);
+		int killed = 0;
+		for (size_t i = 0; i < units.size(); ++i) {
+			if (!UnitRefValid(units[i])) continue;      // 已被前面的死亡触发器移除 / 句柄被回收
+			KillUnit(units[i].unit);
+			++killed;
+		}
 		ResultSet(r, RES_OK, L"已秒杀玩家 %d 的 %d 个单位", GetPlayerId(owner) + 1, killed);
 		break;
 	}
@@ -511,11 +603,21 @@ static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
 // ---------------------------------------------------------------------------
 static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResult& r) {
 	if (!shm) return;
+	// 结果环：先把条目的 counter 清 0，写内容，最后写 counter（界面按顺序锁方式读取，不会读到写了一半的条目）
+	LONG n = shm->resultCounter + 1;
+	W3T_ResultEntry& e = shm->results[n % W3T_RESULT_RING];
+	InterlockedExchange(&e.counter, 0);
+	e.seq = seq;
+	e.cmd = cmd;
+	e.code = r.code;
+	memcpy(e.text, r.text, sizeof(e.text));
+	InterlockedExchange(&e.counter, n);
+	// 最近一条的副本
 	shm->resultCmd = cmd;
 	shm->resultCode = r.code;
 	memcpy(shm->resultText, r.text, sizeof(shm->resultText));
 	InterlockedExchange(&shm->resultSeq, seq);
-	InterlockedIncrement(&shm->resultCounter);
+	InterlockedExchange(&shm->resultCounter, n);
 
 	if (shm->inGameMessages && r.code != RES_NOT_IN_GAME) {
 		// 魔兽内部文字是 UTF-8；先拼宽字符串再统一转换，不依赖编译器的窄字符串编码
@@ -524,7 +626,7 @@ static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResul
 		wide[199] = 0;
 		char utf8[600];
 		WideToUtf8(wide, utf8, sizeof(utf8));
-		SafeRun([&] { TextPrint(4.0f, utf8); });
+		SafeRun([&] { if (IsInGame()) TextPrint(4.0f, utf8); });
 	}
 }
 
@@ -545,6 +647,7 @@ void Trainer_Execute(W3T_Shared* shm, const W3T_CmdSlot& slot) {
 }
 
 void Trainer_SyncToggles(W3T_Shared* shm) {
+	static const wchar_t* const kNames[TGL_COUNT] = { L"不会失败", L"娱乐模式", L"允许光环叠加", L"英雄最大等级", L"选中单位无CD无蓝耗" };
 	for (int id = 0; id < TGL_COUNT; ++id) {
 		bool want = shm->toggleWant[id] != 0;
 		bool have = shm->toggleState[id] != 0;
@@ -555,9 +658,14 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 		ResultSet(r, RES_OK, L"");
 		bool ok = false;
 		bool ran = SafeRun([&] {
-			if (want) {
-				bool inGame = IsInGame();
-				if (inGame && jass::NativesComplete(NULL) && HumanPlayersCount() > 1) {
+			// 开启只能在单人游戏进行中：主菜单 / 大厅里打开的补丁会带进下一局（可能是多人游戏），
+			// 而且读图时游戏会缓存部分数值（例如人口上限），之后再还原代码也撤销不了。关闭任何时候都可以。
+			if (want && !have && kTogglesNeedGame) {
+				if (!jass::NativesComplete(NULL) || !IsInGame()) {
+					ResultSet(r, RES_NOT_IN_GAME, L"%ls：请先进入单人游戏再开启（退出游戏时会自动关闭）", kNames[id]);
+					return;
+				}
+				if (HumanPlayersCount() > 1) {
 					ResultSet(r, RES_MULTIPLAYER, L"检测到多人游戏，常驻开关只能在单人游戏中使用");
 					return;
 				}
@@ -566,9 +674,19 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 				ok = true;
 				return;
 			}
+			bool inGame = IsInGame();
+			if (id == TGL_FUN_MODE && !want && inGame) FoodCeilingApply(false);     // 先还原人口，再还原代码
 			wchar_t reason[160];
+			reason[0] = 0;
 			ok = PatchApply(id, want, argument, reason, 160);
-			if (!ok) ResultSet(r, PatchSupported(id) ? RES_FAILED : RES_UNSUPPORTED, L"%ls", reason[0] ? reason : L"当前版本不支持该开关");
+			if (!ok) {
+				ResultSet(r, PatchSupported(id) ? RES_FAILED : RES_UNSUPPORTED, L"%ls", reason[0] ? reason : L"当前版本不支持该开关");
+				return;
+			}
+			if (id == TGL_FUN_MODE) {
+				if (want && inGame) FoodCeilingApply(true);
+				else if (!want) FoodApplied = false;
+			}
 		});
 		if (!ran) {
 			ResultSet(r, RES_EXCEPTION, L"切换开关时发生异常 %08lX，已拦截", SafeLastExceptionCode());
@@ -579,10 +697,28 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 		} else {
 			shm->toggleWant[id] = shm->toggleState[id];             // 失败：界面恢复原状态
 		}
-		static const wchar_t* const kNames[TGL_COUNT] = { L"不会失败", L"娱乐模式", L"允许光环叠加", L"英雄最大等级", L"选中单位无CD无蓝耗" };
 		if (ok) ResultSet(r, RES_OK, L"%ls：%ls", kNames[id], want ? L"已开启" : L"已关闭");
 		ResultPublish(shm, shm->resultSeq, -(id + 1), r);
 	}
+}
+
+static bool AnyToggleOn(W3T_Shared* shm) {
+	for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) if (shm->toggleState[id]) return true;
+	return false;
+}
+
+static void NoticePublish(W3T_Shared* shm, int code, const wchar_t* text) {
+	CommandResult r;
+	ResultSet(r, code, L"%ls", text);
+	ResultPublish(shm, shm->resultSeq, 0, r);
+}
+
+// 换图 / 退出游戏：清空本局的记录（句柄已经属于上一局）
+static void GameStateReset() {
+	DummyUnits.clear();
+	NoCollisionUnits.clear();
+	GamePausedByTrainer = false;
+	MultiplayerWarned = false;
 }
 
 void Trainer_Tick(W3T_Shared* shm) {
@@ -591,20 +727,36 @@ void Trainer_Tick(W3T_Shared* shm) {
 	SafeRun([&] {
 		bool complete = jass::NativesComplete(NULL);
 		bool inGame = complete && IsInGame();
+		void* gameObject = inGame ? GameObjectGet() : NULL;
 		shm->inGame = inGame ? 1 : 0;
+
+		// 退出游戏或换了一局：常驻开关一律关闭，不让补丁带进下一局
+		if (gameObject != LastGameObject) {
+			if (LastGameObject && AnyToggleOn(shm)) {
+				TogglesRestoreAll(shm, false);
+				NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭");
+			}
+			GameStateReset();
+			LastGameObject = gameObject;
+		}
 		if (!inGame) {
 			shm->selValid = 0;
-			DummyUnits.clear();
-			NoCollisionUnits.clear();
-			GamePausedByTrainer = false;
-			MultiplayerWarned = false;
+			if (kTogglesNeedGame && AnyToggleOn(shm)) {     // 兜底：不在游戏中不允许有开着的开关
+				TogglesRestoreAll(shm, false);
+				NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭");
+			}
 			return;
 		}
 
-		// 清理到期的施法单位
+		// 施法完成（当前命令回到 0）的施法单位立即删除；最长保留 30 秒。
+		// 用命令状态而不是固定时间判断：游戏暂停时施法也会暂停，不会被提前删掉。
 		for (size_t i = 0; i < DummyUnits.size();) {
-			if ((LONG)(now - DummyUnits[i].deadline) >= 0) {
-				RemoveUnit(DummyUnits[i].unit);
+			PendingRemoval& pr = DummyUnits[i];
+			bool valid = UnitRefValid(pr.ref);
+			bool done = !valid || (now - pr.created > 300 && GetUnitCurrentOrder(pr.ref.unit) == 0) ||
+				(LONG)(now - pr.deadline) >= 0;
+			if (done) {
+				if (valid) RemoveUnit(pr.ref.unit);
 				DummyUnits.erase(DummyUnits.begin() + i);
 			} else {
 				++i;
@@ -619,21 +771,13 @@ void Trainer_Tick(W3T_Shared* shm) {
 		shm->humanPlayers = humans;
 		shm->localPlayerId = GetPlayerId(GetLocalPlayer());
 
-		// 多人游戏：自动关闭所有常驻开关
+		// 多人游戏：自动关闭所有常驻开关（正常情况下开关只能在单人游戏中打开，这里是兜底）
 		if (humans > 1) {
-			bool any = false;
-			for (int id = 0; id < TGL_COUNT; ++id) {
-				if (shm->toggleState[id]) any = true;
-				shm->toggleWant[id] = 0;
-			}
-			if (any) {
-				PatchRestoreAll();
-				for (int id = 0; id < TGL_COUNT; ++id) shm->toggleState[id] = 0;
-			}
+			bool any = AnyToggleOn(shm);
+			if (any) TogglesRestoreAll(shm, true);
+			for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) shm->toggleWant[id] = 0;
 			if (any || !MultiplayerWarned) {
-				CommandResult r;
-				ResultSet(r, RES_MULTIPLAYER, any ? L"检测到多人游戏，已自动关闭所有常驻开关" : L"检测到多人游戏，修改器功能已停用");
-				ResultPublish(shm, shm->resultSeq, 0, r);
+				NoticePublish(shm, RES_MULTIPLAYER, any ? L"检测到多人游戏，已自动关闭所有常驻开关" : L"检测到多人游戏，修改器功能已停用");
 				MultiplayerWarned = true;
 			}
 			shm->selValid = 0;
@@ -659,19 +803,16 @@ void Trainer_Tick(W3T_Shared* shm) {
 }
 
 void Trainer_Shutdown(W3T_Shared* shm) {
+	bool inGame = false;
 	SafeRun([&] {
-		if (IsInGame()) {
-			for (size_t i = 0; i < DummyUnits.size(); ++i) RemoveUnit(DummyUnits[i].unit);
+		inGame = jass::NativesComplete(NULL) && IsInGame();
+		if (inGame) {
+			for (size_t i = 0; i < DummyUnits.size(); ++i) {
+				if (UnitRefValid(DummyUnits[i].ref)) RemoveUnit(DummyUnits[i].ref.unit);
+			}
 			if (GamePausedByTrainer) PauseGame(0);
 		}
 	});
-	DummyUnits.clear();
-	GamePausedByTrainer = false;
-	PatchRestoreAll();
-	if (shm) {
-		for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) {
-			shm->toggleState[id] = 0;
-			shm->toggleWant[id] = 0;
-		}
-	}
+	GameStateReset();
+	TogglesRestoreAll(shm, inGame);
 }

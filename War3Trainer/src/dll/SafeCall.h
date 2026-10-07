@@ -4,8 +4,9 @@
 // 而不是把玩家的游戏打崩。
 //
 //   MSVC   ：__try / __except
-//   MinGW  ：在 fs:[0] 链上手工注册一个 SEH 帧（与 MSVC __try 的机制相同），
-//            异常时用 __builtin_longjmp 跳回，并恢复 fs:[0]。
+//   MinGW  ：在 fs:[0] 链上手工注册一个 SEH 帧（与 MSVC __try 的机制相同）；
+//            异常时先 RtlUnwind 全局展开（让游戏自己的 __finally / 析构正常执行），
+//            再用 __builtin_longjmp 跳回，并恢复 fs:[0]。
 //            游戏函数内部自己的 SEH 帧在我们之后注册，所以游戏自己能处理的异常不受影响。
 #ifndef SAFECALL_H_INCLUDED_
 #define SAFECALL_H_INCLUDED_

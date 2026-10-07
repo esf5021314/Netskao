@@ -58,6 +58,12 @@ static int KeyFromName(const wchar_t* token) {
 	// 单个字母 / 数字
 	if (!t[1] && t[0] >= L'a' && t[0] <= L'z') return 'A' + (t[0] - L'a');
 	if (!t[1] && t[0] >= L'0' && t[0] <= L'9') return '0' + (t[0] - L'0');
+	// 没有名字的键保存为 KeyXX（十六进制虚拟键码），见 KeyToName
+	if (wcsncmp(t, L"key", 3) == 0 && t[3] && t[4] && !t[5]) {
+		wchar_t* end = NULL;
+		unsigned long v = wcstoul(t + 3, &end, 16);
+		if (end && !*end && v >= 1 && v <= 0xFE) return (int)v;
+	}
 	for (size_t i = 0; i < sizeof(kKeyNames) / sizeof(kKeyNames[0]); ++i) {
 		wchar_t n[32];
 		Lower(kKeyNames[i].name, n, 32);
@@ -174,9 +180,13 @@ static std::vector<HotkeyBinding> Bindings;
 static std::vector<bool> WasActive;
 static HotkeyFilter Filter = { NULL, 0, true, false };
 
-// 捕获状态
-static volatile LONG CaptureRequested = 0;
-static bool Capturing = false;
+// 捕获状态（CaptureWanted / CaptureGen 由 Lock 保护）
+//   界面线程：开始捕获时 CaptureWanted = 新编号，取消时 CaptureWanted = 0；
+//   轮询线程：CaptureActive 跟随 CaptureWanted，结束时先在锁内确认编号没变再投递结果，
+//   所以取消之后不会再收到旧捕获的结果。
+static LONG CaptureGen = 0;             // 最近一次分配的捕获编号
+static LONG CaptureWanted = 0;          // 界面要求的捕获编号（0 = 不捕获）
+static LONG CaptureActive = 0;          // 轮询线程正在进行的捕获编号（只在轮询线程使用）
 static bool CaptureBaseline[256];        // 开始捕获时已经按着的键（卡住的键），松开之前一律忽略
 static HotkeyBinding CaptureResult;
 
@@ -220,11 +230,20 @@ static bool ForegroundAllowed(const HotkeyFilter& f) {
 	return f.gamePid && pid == f.gamePid;
 }
 
-static void CaptureStart() {
-	Capturing = true;
+static void CaptureStart(LONG gen) {
+	CaptureActive = gen;
 	HotkeyBinding empty = { 0, 0, { 0, 0, 0 } };
 	CaptureResult = empty;
 	for (int vk = 0; vk < 256; ++vk) CaptureBaseline[vk] = vk > 0 && vk < 0xFF && KeyDown(vk);
+}
+
+// 前台窗口是否属于修改器自己（捕获只接受在修改器窗口里按下的键）
+static bool ForegroundIsSelf() {
+	HWND fg = GetForegroundWindow();
+	if (!fg) return false;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(fg, &pid);
+	return pid == GetCurrentProcessId();
 }
 
 // 捕获时的按键状态：忽略开始捕获时已经按着、且还没松开过的键
@@ -235,6 +254,7 @@ static bool CaptureKeyDown(int vk) {
 }
 
 static void CaptureStep() {
+	if (!ForegroundIsSelf()) return;    // 在游戏或其它程序里按的键不算
 	bool anyDown = false;
 	for (int vk = 1; vk < 0xFF; ++vk) {
 		if (vk == VK_LBUTTON || vk == VK_RBUTTON) continue;
@@ -257,13 +277,20 @@ static void CaptureStep() {
 		CaptureResult.mods = 0;         // 只按了修饰键，继续等
 		return;
 	}
-	Capturing = false;
-	WPARAM kind = 1;
+	WPARAM kind = HK_CAPTURE_SET;
 	if (CaptureResult.count == 1 && CaptureResult.mods == 0) {
-		if (CaptureResult.keys[0] == VK_ESCAPE) kind = 0;
-		else if (CaptureResult.keys[0] == VK_BACK || CaptureResult.keys[0] == VK_DELETE) kind = 2;
+		if (CaptureResult.keys[0] == VK_ESCAPE) kind = HK_CAPTURE_CANCEL;
+		else if (CaptureResult.keys[0] == VK_BACK || CaptureResult.keys[0] == VK_DELETE) kind = HK_CAPTURE_CLEAR;
 	}
-	PostMessageW(NotifyWindow, WM_APP_HOTKEY_CAPTURED, kind, Hotkey_Pack(CaptureResult));
+	LONG gen = CaptureActive;
+	CaptureActive = 0;
+	// 在锁内确认这次捕获没有被取消 / 替换，再投递结果
+	EnterCriticalSection(&Lock);
+	if (CaptureWanted == gen) {
+		CaptureWanted = 0;
+		PostMessageW(NotifyWindow, WM_APP_HOTKEY_CAPTURED, kind | ((WPARAM)gen << 4), Hotkey_Pack(CaptureResult));
+	}
+	LeaveCriticalSection(&Lock);
 }
 
 static DWORD WINAPI PollThread(LPVOID) {
@@ -271,14 +298,18 @@ static DWORD WINAPI PollThread(LPVOID) {
 		Sleep(20);
 		DWORD now = GetTickCount();
 
-		if (InterlockedExchange(&CaptureRequested, 0)) CaptureStart();
-
 		EnterCriticalSection(&Lock);
 		HotkeyFilter filter = Filter;
-		bool capturing = Capturing;
+		LONG wanted = CaptureWanted;
 		LeaveCriticalSection(&Lock);
 
-		if (capturing) {
+		// 跟随界面的捕获请求：开始新的捕获，或者放弃已取消的捕获
+		if (wanted != CaptureActive) {
+			if (wanted) CaptureStart(wanted);
+			else CaptureActive = 0;
+		}
+
+		if (CaptureActive) {
 			CaptureStep();
 			// 捕获期间所有组合都视为“按住”，避免捕获结束瞬间误触发
 			EnterCriticalSection(&Lock);
@@ -347,13 +378,19 @@ void Hotkey_SetFilter(const HotkeyFilter& filter) {
 	LeaveCriticalSection(&Lock);
 }
 
-void Hotkey_BeginCapture() {
-	InterlockedExchange(&CaptureRequested, 1);
+LONG Hotkey_BeginCapture() {
+	if (!Thread) return 0;
+	EnterCriticalSection(&Lock);
+	if (++CaptureGen > 0x0FFFFFFF) CaptureGen = 1;     // 编号放在 wParam 的高 28 位
+	CaptureWanted = CaptureGen;
+	LONG gen = CaptureGen;
+	LeaveCriticalSection(&Lock);
+	return gen;
 }
 
 void Hotkey_CancelCapture() {
-	InterlockedExchange(&CaptureRequested, 0);
+	if (!Thread) return;
 	EnterCriticalSection(&Lock);
-	Capturing = false;
+	CaptureWanted = 0;
 	LeaveCriticalSection(&Lock);
 }

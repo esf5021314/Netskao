@@ -1,6 +1,7 @@
 # 魔兽争霸 III 修改器（大象修改器 C++ 重制版）
 #
-# Visual Studio：文件 -> 打开 -> 文件夹，选择本目录；配置选 x86-Release
+# Visual Studio 2019（16.10 以上）/ 2022：文件 -> 打开 -> 文件夹，选择本目录，
+#   配置下拉框选 x86-Release（见 CMakePresets.json）；VS 2017 请用 build_msvc.bat
 #   或命令行：cmake -B build -A Win32 && cmake --build build --config Release
 # MinGW：     cmake -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER=i686-w64-mingw32-g++
 #
@@ -37,10 +38,13 @@ endif()
 # ---- 注入模块 ----
 file(GLOB DLL_SOURCES CONFIGURE_DEPENDS src/dll/*.cpp)
 add_library(War3TrainerDll SHARED ${DLL_SOURCES})
-set_target_properties(War3TrainerDll PROPERTIES OUTPUT_NAME War3Trainer PREFIX "")
+# 输出名与界面程序相同（War3Trainer），调试信息另起名字，避免两者都写 bin/War3Trainer.pdb / .ilk
+set_target_properties(War3TrainerDll PROPERTIES OUTPUT_NAME War3Trainer PREFIX "" PDB_NAME War3TrainerDll)
 target_include_directories(War3TrainerDll PRIVATE include src/dll)
 target_link_libraries(War3TrainerDll PRIVATE version user32)
-if(NOT MSVC)
+if(MSVC)
+    target_link_options(War3TrainerDll PRIVATE /INCREMENTAL:NO)
+else()
     target_link_options(War3TrainerDll PRIVATE -Wl,--exclude-all-symbols)
 endif()
 

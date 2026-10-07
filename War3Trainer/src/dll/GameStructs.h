@@ -31,8 +31,9 @@ namespace war3 {
 		uint32_t		unk_4;				//0x4
 		uint32_t		jassStringId;		//0x8
 		uint8_t			unk_C[0x1C];		//0xC
-		uint16_t		localPlayerSlot;	//0x28	本地玩家编号
-		uint8_t			unk_2A[0x1A];		//0x2A
+		uint16_t		localPlayerSlot;	//0x28	本地玩家编号（正常游戏时 GetLocalPlayer 返回此值）
+		uint16_t		viewPlayerSlot;		//0x2A	回放 / 观察时 GetLocalPlayer 返回此值（1.24E 0x3BC6AF 处判断）
+		uint8_t			unk_2C[0x18];		//0x2C
 		uint32_t		maxPlayers;			//0x44	地图玩家槽位数
 		uint8_t			unk_48[0x04];		//0x48
 		uint32_t		activePlayers;		//0x4C	活动玩家数

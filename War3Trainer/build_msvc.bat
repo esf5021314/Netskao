@@ -11,10 +11,12 @@ rem ==========================================================================
 setlocal
 cd /d "%~dp0"
 
-where cl.exe >nul 2>nul
-if not errorlevel 1 goto have_cl
+rem Reuse the current prompt only if it is already an x86 (32-bit) VS prompt;
+rem an x64 prompt would fail with LNK1112, so set up x86 ourselves in that case.
+if /i "%VSCMD_ARG_TGT_ARCH%"=="x86" goto have_cl
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
     echo [ERROR] vswhere.exe not found. Install Visual Studio 2017 or later with "Desktop development with C++".
     goto fail
@@ -26,6 +28,8 @@ if not defined VSINSTALL (
 )
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul
 if errorlevel 1 goto fail
+rem vcvarsall may change the current directory; go back to the script directory
+cd /d "%~dp0"
 
 :have_cl
 if not exist bin mkdir bin

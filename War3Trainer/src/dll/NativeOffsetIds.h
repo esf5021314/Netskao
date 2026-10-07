@@ -61,8 +61,9 @@
 #define NATIVE_FogEnable                    1055
 #define NATIVE_FogMaskEnable                1056
 #define NATIVE_PauseGame                    1057
+#define NATIVE_GetUnitCurrentOrder          1058
 
 #define NATIVE_ID_FIRST 1000    // 第一个原生函数编号
-#define NATIVE_ID_COUNT 58      // 原生函数个数
+#define NATIVE_ID_COUNT 59      // 原生函数个数
 
 #endif

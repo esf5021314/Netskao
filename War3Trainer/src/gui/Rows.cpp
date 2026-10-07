@@ -63,13 +63,13 @@ const RowDef kRows[] = {
 	CMD(CMD_XP_RATE,           GROUP_ITEM, L"XpRate",          L"经验获取率（倍数）",                L"Ctrl+Num0",    ARG_FLOAT, L"10",      0, L"1.27A：增加经验获取率，1 = 正常"),
 
 	// ---------------- 游戏 ----------------
-	CMD(CMD_FOG_OFF,           GROUP_GAME, L"FogOff",          L"关闭战争迷雾（MapON）",             L"Home",         ARG_NONE,  L"",        0, L"原版 Home：FogEnable(false) / FogMaskEnable(false)"),
+	CMD(CMD_FOG_OFF,           GROUP_GAME, L"FogOff",          L"关闭战争迷雾（MapON）",             L"Home",         ARG_NONE,  L"",        0, L"原版 Home：FogEnable(false) / FogMaskEnable(false)，等同作弊码 iseedeadpeople"),
 	CMD(CMD_FOG_ON,            GROUP_GAME, L"FogOn",           L"恢复战争迷雾（MapOFF）",            L"End",          ARG_NONE,  L"",        0, L"原版 End"),
 	CMD(CMD_PAUSE_GAME,        GROUP_GAME, L"PauseGame",       L"暂停 / 继续游戏",                  L"Pause",        ARG_NONE,  L"",        0, L"1.27A：暂停游戏 / 恢复游戏"),
 
 	// ---------------- 常驻开关 ----------------
 	TGL(TGL_NO_DEFEAT,         L"NoDefeat",        L"不会失败",                        L"Ctrl+Num3",    ARG_NONE,  L"",        W3T_SUPPORT_PATCHES, L"原版 Ctrl+numeric 3：IsNoDefeatCheat 恒为真"),
-	TGL(TGL_FUN_MODE,          L"FunMode",         L"娱乐模式（快速建造/建筑可重叠/人口65535）", L"Ctrl+Num7", ARG_NONE, L"",    W3T_SUPPORT_PATCHES, L"原版 Ctrl+numeric 7"),
+	TGL(TGL_FUN_MODE,          L"FunMode",         L"娱乐模式（快速建造/建筑可重叠/人口65535）", L"Ctrl+Num7", ARG_NONE, L"",    W3T_SUPPORT_PATCHES, L"原版 Ctrl+numeric 7；人口上限立即生效，关闭时还原"),
 	TGL(TGL_AURA_STACK,        L"AuraStack",       L"允许光环叠加",                    L"Ctrl+Num9",    ARG_NONE,  L"",        W3T_SUPPORT_PATCHES, L"1.20E Ctrl+numeric 9"),
 	TGL(TGL_MAX_HERO_LEVEL,    L"MaxHeroLevel",    L"英雄最大等级",                    L"Alt+Num1",     ARG_INT,   L"100000",  W3T_SUPPORT_MAXLEVEL, L"1.20E Alt+numeric 1：英雄最大等级10W"),
 	TGL(TGL_NOCD_NOMANA,       L"NoCdNoMana",      L"选中单位无CD无蓝耗",              L"Alt+Num2",     ARG_NONE,  L"",        0, L"1.27A：无CD无蓝耗（对当前选中的单位持续生效）"),

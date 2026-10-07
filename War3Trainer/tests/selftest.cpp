@@ -1,7 +1,7 @@
 ﻿// 模块说明：
 // 自测程序（控制台），不需要游戏即可运行，用于检查：
-//   1. SafeInvoke 能拦截游戏函数里的访问违例，并正确恢复 fs:[0]；
-//   2. 所有默认快捷键都能解析，并且格式化后再解析结果不变；
+//   1. SafeInvoke 能拦截游戏函数里的访问违例，执行全局展开（通知游戏自己的 SEH 帧），并正确恢复 fs:[0]；
+//   2. 所有默认快捷键都能解析，并且格式化后再解析结果不变（包括没有名字、保存为 KeyXX 的键）；
 //   3. 偏移表：17 个版本的原生函数表完整，1.24E / 1.20E 的地址与原版 CE 脚本一致；
 //   4. 4 字符代码换算与原版脚本 `push 41496e76 //物品栏英雄` 一致。
 // 编译：见 build_mingw.sh（生成 build/selftest.exe），在 Windows 或 Wine 下运行。
@@ -30,6 +30,30 @@ static void NestedHandled(void*) {
 static int Counter = 0;
 static void Normal(void*) { ++Counter; }
 
+// 模拟游戏函数自己注册的 SEH 帧（相当于游戏里的 __try / __finally）：
+// SafeInvoke 拦截异常后必须先全局展开，这个帧的处理函数应以 EXCEPTION_UNWINDING 被调用一次
+#ifndef EXCEPTION_UNWINDING
+#define EXCEPTION_UNWINDING 0x2
+#endif
+struct InnerSehFrame {
+	InnerSehFrame* prev;
+	void* handler;
+};
+static int UnwindCalls = 0;
+static EXCEPTION_DISPOSITION __cdecl InnerHandler(EXCEPTION_RECORD* record, void*, CONTEXT*, void*) {
+	if (record->ExceptionFlags & EXCEPTION_UNWINDING) ++UnwindCalls;
+	return ExceptionContinueSearch;
+}
+static void __attribute__((noinline)) InnerWithFrame(void*) {
+	InnerSehFrame frame;
+	__asm__ __volatile__("movl %%fs:0, %0" : "=r"(frame.prev));
+	frame.handler = reinterpret_cast<void*>(InnerHandler);
+	__asm__ __volatile__("movl %0, %%fs:0" : : "r"(&frame) : "memory");
+	volatile int* p = NULL;
+	*p = 1;
+	__asm__ __volatile__("movl %0, %%fs:0" : : "r"(frame.prev) : "memory");
+}
+
 static void TestSafeCall() {
 	printf("SafeInvoke ...\n");
 	void* before;
@@ -38,7 +62,12 @@ static void TestSafeCall() {
 	CHECK(!SafeInvoke(Crash, NULL), "访问违例没有被拦截");
 	CHECK(SafeLastExceptionCode() == EXCEPTION_ACCESS_VIOLATION, "异常码 %08lX", SafeLastExceptionCode());
 	CHECK(SafeInvoke(NestedHandled, NULL) && !NestedInnerResult, "嵌套保护失败");
+	UnwindCalls = 0;
+	CHECK(!SafeInvoke(InnerWithFrame, NULL), "内层带 SEH 帧的异常没有被拦截");
+	CHECK(UnwindCalls == 1, "全局展开没有通知内层 SEH 帧（%d 次）", UnwindCalls);
 	for (int i = 0; i < 1000; ++i) SafeInvoke(Crash, NULL);
+	for (int i = 0; i < 1000; ++i) SafeInvoke(InnerWithFrame, NULL);
+	CHECK(UnwindCalls == 1001, "反复展开后计数 %d", UnwindCalls);
 	void* after;
 	__asm__ __volatile__("movl %%fs:0, %0" : "=r"(after));
 	CHECK(before == after, "fs:[0] 没有恢复 %p -> %p", before, after);
@@ -75,6 +104,22 @@ static void TestHotkeys() {
 	HotkeyBinding add = { HK_CTRL, 1, { VK_ADD, 0, 0 } };
 	Hotkey_Format(add, text, 64);
 	CHECK(Hotkey_Parse(text, a) && Hotkey_Equal(a, add), "小键盘加号往返：%ls", text);
+	// 所有虚拟键（包括没有名字、保存为 KeyXX 的键）格式化后都能解析回来，带不带修饰键都一样
+	static const BYTE kMods[] = { 0, HK_CTRL, HK_CTRL | HK_ALT | HK_SHIFT };
+	int bad = 0;
+	for (int vk = 1; vk <= 0xFE; ++vk) {
+		for (int m = 0; m < 3; ++m) {
+			HotkeyBinding k = { kMods[m], 1, { (BYTE)vk, 0, 0 } };
+			Hotkey_Format(k, text, 64);
+			HotkeyBinding r;
+			if (!Hotkey_Parse(text, r) || !Hotkey_Equal(k, r)) {
+				if (bad++ < 5) printf("  [失败] 虚拟键 %02X 格式化为 %ls 后无法解析回来\n", vk, text);
+			}
+		}
+	}
+	CHECK(bad == 0, "共 %d 个虚拟键无法往返", bad);
+	CHECK(Hotkey_Parse(L"Ctrl+KeyC1", a) && a.keys[0] == 0xC1 && a.mods == HK_CTRL, "KeyXX 写法");
+	CHECK(!Hotkey_Parse(L"Key", a) && !Hotkey_Parse(L"KeyFF", a) && !Hotkey_Parse(L"Key0x", a) && !Hotkey_Parse(L"Key123", a), "无效的 KeyXX 应解析失败");
 }
 
 static void TestOffsets() {

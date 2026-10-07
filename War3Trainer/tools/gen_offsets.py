@@ -47,6 +47,8 @@ NATIVES = [
     "UnitRemoveItemFromSlot", "UnitAddItemToSlotById",
     # 游戏
     "FogEnable", "FogMaskEnable", "PauseGame",
+    # 追加（编号顺延，不要插队）
+    "GetUnitCurrentOrder",
 ]
 NATIVE_ID_BASE = 1000
 

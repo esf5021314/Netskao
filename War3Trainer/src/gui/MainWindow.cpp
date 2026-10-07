@@ -51,11 +51,13 @@ static HWND ChkMessages, ChkActive, ChkTopMost, ChkUnload, BtnAbout;
 static HWND EditBox = NULL;
 static WNDPROC EditBoxOriginalProc = NULL;
 static int EditRow = -1;
-static int CaptureRow = -1;
+static int CaptureRow = -1;             // 正在修改快捷键的行（-1 = 没有）
+static LONG CaptureGen = 0;             // 当前捕获的编号，旧捕获的结果消息据此丢弃
 static std::vector<RowState> RowStates;
 static HFONT FontNormal, FontBold, FontTitle, FontSubtitle;
 static int Dpi = 96;
-static LONG LastResultCounter = -1;
+static LONG LastResultCounter = 0;      // 已显示到第几条结果
+static LONG ResultSession = -1;         // 结果序号属于哪一次连接（见 LinkInfo::session）
 static int PendingRows[W3T_CMD_RING * 2];      // 命令序号 -> 行号
 static wchar_t StatusText[256];
 
@@ -223,25 +225,24 @@ static void RowExecute(int row) {
 	RowStatusSet(row, L"执行中…", COLOR_BUSY, true);
 }
 
-// 读取模块发布的结果
-static void ResultsPoll(W3T_Shared* shm) {
-	if (!shm) { LastResultCounter = -1; return; }
-	LONG counter = shm->resultCounter;
-	if (counter == LastResultCounter) return;
-	bool first = LastResultCounter < 0;
-	LastResultCounter = counter;
-	if (first) return;      // 刚连接上：忽略之前的旧结果
+// 按顺序锁读取第 n 条结果：复制前后 counter 都等于 n 才算完整（模块写入过程中 counter 为 0）
+static bool ResultRead(W3T_Shared* shm, LONG n, W3T_ResultEntry* out) {
+	W3T_ResultEntry* entry = &shm->results[(DWORD)n % W3T_RESULT_RING];
+	if (InterlockedCompareExchange(&entry->counter, 0, 0) != n) return false;
+	memcpy(out, entry, sizeof(*out));
+	if (InterlockedCompareExchange(&entry->counter, 0, 0) != n) return false;
+	out->text[159] = 0;
+	return true;
+}
 
-	wchar_t text[160];
-	memcpy(text, shm->resultText, sizeof(text));
-	text[159] = 0;
-	int code = shm->resultCode;
-	int cmd = shm->resultCmd;
-	bool ok = code == RES_OK;
+static void ResultShow(const W3T_ResultEntry& result) {
+	const wchar_t* text = result.text;
+	int cmd = result.cmd;
+	bool ok = result.code == RES_OK;
 
 	int row = -1;
 	if (cmd > 0) {
-		int candidate = PendingRows[shm->resultSeq % (W3T_CMD_RING * 2)];
+		int candidate = PendingRows[(DWORD)result.seq % (W3T_CMD_RING * 2)];
 		if (candidate >= 0 && candidate < kRowCount && kRows[candidate].kind == ROW_COMMAND && kRows[candidate].id == cmd) row = candidate;
 	} else if (cmd < 0) {
 		int toggle = -cmd - 1;
@@ -255,6 +256,28 @@ static void ResultsPoll(W3T_Shared* shm) {
 	} else {
 		StatusSet(L"%ls", text);
 	}
+}
+
+// 读取模块发布的结果（环形结果区，两次刷新之间来了多条也不会丢）
+static void ResultsPoll(W3T_Shared* shm) {
+	if (!shm) return;
+	const LinkInfo& info = GameLink_Info();
+	if (info.session != ResultSession) {     // 新连接：连接之前的旧结果不显示
+		ResultSession = info.session;
+		LastResultCounter = info.resultBase;
+	}
+	LONG counter = InterlockedCompareExchange(&shm->resultCounter, 0, 0);
+	if (counter - LastResultCounter <= 0) {
+		LastResultCounter = counter;
+		return;
+	}
+	LONG first = LastResultCounter + 1;
+	if (counter - first >= W3T_RESULT_RING) first = counter - W3T_RESULT_RING + 1;     // 太旧的已被覆盖
+	for (LONG n = first; n - counter <= 0; ++n) {
+		W3T_ResultEntry result;
+		if (ResultRead(shm, n, &result)) ResultShow(result);
+	}
+	LastResultCounter = counter;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +317,9 @@ static void UiRefresh() {
 		_snwprintf(line1, 255, L"找到游戏 %ls（PID %lu），正在加载修改器模块……", info.exeName, info.pid);
 		break;
 	case LINK_READY:
-		_snwprintf(line1, 255, L"游戏：%ls（PID %lu）    版本：%ls%ls    状态：已连接", info.exeName, info.pid,
-			shm->versionName, (shm->supportFlags & W3T_SUPPORT_VERIFIED) ? L"（已逐条核对）" : L"（未完全核对，部分功能可能无效）");
+		_snwprintf(line1, 255, L"游戏：%ls（PID %lu）    版本：%ls%ls    状态：%ls", info.exeName, info.pid,
+			shm->versionName, (shm->supportFlags & W3T_SUPPORT_VERIFIED) ? L"（已逐条核对）" : L"（未完全核对，部分功能可能无效）",
+			info.stalled ? L"游戏暂时无响应（读图中？）" : L"已连接");
 		break;
 	default:
 		_snwprintf(line1, 255, L"错误：%ls", GameLink_Error());
@@ -352,6 +376,19 @@ static void UiRefresh() {
 }
 
 // ---------------------------------------------------------------------------
+// 快捷键捕获的取消（编辑数值、弹出菜单、点到别处、窗口失去激活时调用）
+// ---------------------------------------------------------------------------
+static void CaptureCancel() {
+	if (CaptureRow < 0) return;
+	Hotkey_CancelCapture();
+	int row = CaptureRow;
+	CaptureRow = -1;
+	CaptureGen = 0;
+	HotkeyCellRefresh(row);
+	FilterPush();
+}
+
+// ---------------------------------------------------------------------------
 // 数值编辑
 // ---------------------------------------------------------------------------
 static void EditEnd(bool commit);
@@ -376,6 +413,7 @@ static LRESULT CALLBACK EditBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void EditBegin(int row) {
 	if (row < 0 || row >= kRowCount || kRows[row].arg == ARG_NONE) return;
+	CaptureCancel();        // 否则在编辑框里输入的数字会被当成新快捷键
 	if (EditBox) EditEnd(true);
 	int item = ItemFromRow(row);
 	if (item < 0) return;
@@ -440,12 +478,14 @@ static void EditEnd(bool commit) {
 static void CaptureBegin(int row) {
 	if (row < 0 || row >= kRowCount) return;
 	if (EditBox) EditEnd(true);
-	if (CaptureRow >= 0) HotkeyCellRefresh(CaptureRow);
+	CaptureCancel();
+	LONG gen = Hotkey_BeginCapture();
+	if (!gen) return;
 	CaptureRow = row;
+	CaptureGen = gen;
 	CellSet(row, 0, L"请按键……");
 	StatusSet(L"为“%ls”按下新的快捷键（可以是组合键）；Esc 取消，Backspace 清除", kRows[row].name);
 	FilterPush();
-	Hotkey_BeginCapture();
 }
 
 static void HotkeyAssign(int row, const HotkeyBinding& binding) {
@@ -456,18 +496,28 @@ static void HotkeyAssign(int row, const HotkeyBinding& binding) {
 	HotkeyCellRefresh(row);
 }
 
-static void CaptureFinish(WPARAM kind, LPARAM packed) {
+static void HotkeyApply(int row, const HotkeyBinding& binding);
+
+static void CaptureFinish(WPARAM wp, LPARAM packed) {
+	// 已取消，或者已经开始了另一次捕获：丢弃旧结果
+	if (CaptureRow < 0 || HK_CAPTURE_GEN(wp) != CaptureGen) return;
 	int row = CaptureRow;
 	CaptureRow = -1;
+	CaptureGen = 0;
 	FilterPush();
-	if (row < 0) return;
-	if (kind == 0) {
+	int kind = HK_CAPTURE_KIND(wp);
+	if (kind == HK_CAPTURE_CANCEL) {
 		HotkeyCellRefresh(row);
 		StatusSet(L"已取消修改快捷键");
 		return;
 	}
 	HotkeyBinding binding = { 0, 0, { 0, 0, 0 } };
-	if (kind == 1) binding = Hotkey_Unpack(packed);
+	if (kind == HK_CAPTURE_SET) binding = Hotkey_Unpack(packed);
+	HotkeyApply(row, binding);
+}
+
+// 设置某一行的快捷键（与其它行冲突时从其它行移除），保存并生效
+static void HotkeyApply(int row, const HotkeyBinding& binding) {
 	// 与其它行冲突：从其它行移除
 	wchar_t moved[256] = L"";
 	if (binding.count) {
@@ -584,6 +634,7 @@ static int HitTest(int* column) {
 
 static void ContextMenuShow(int row) {
 	if (row < 0) return;
+	CaptureCancel();
 	HMENU menu = CreatePopupMenu();
 	AppendMenuW(menu, MF_STRING, IDM_EXECUTE, kRows[row].kind == ROW_TOGGLE ? L"开启 / 关闭(&E)" : L"执行(&E)");
 	AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -611,10 +662,7 @@ static void ContextMenuShow(int row) {
 	}
 	case IDM_DEFAULT_HOTKEY: {
 		HotkeyBinding binding;
-		if (Hotkey_Parse(kRows[row].hotkey, binding)) {
-			CaptureRow = row;
-			CaptureFinish(1, Hotkey_Pack(binding));
-		}
+		if (Hotkey_Parse(kRows[row].hotkey, binding)) HotkeyApply(row, binding);
 		break;
 	}
 	case IDM_EDIT_VALUE: EditBegin(row); break;
@@ -634,14 +682,15 @@ static LRESULT ListNotify(NMHDR* hdr) {
 	case NM_CLICK: {
 		int column = -1;
 		int row = HitTest(&column);
-		if (row < 0) break;
-		if (column == 0) CaptureBegin(row);
-		else if (column == 2 && kRows[row].arg != ARG_NONE) EditBegin(row);
+		if (row >= 0 && column == 0) { CaptureBegin(row); break; }
+		CaptureCancel();        // 点到别处：放弃修改快捷键
+		if (row >= 0 && column == 2 && kRows[row].arg != ARG_NONE) EditBegin(row);
 		break;
 	}
 	case NM_DBLCLK: {
 		int column = -1;
 		int row = HitTest(&column);
+		if (CaptureRow >= 0) break;     // 正在修改快捷键（双击“快捷键”列时）
 		if (row >= 0 && column != 0 && column != 2) RowExecute(row);
 		break;
 	}
@@ -651,6 +700,7 @@ static LRESULT ListNotify(NMHDR* hdr) {
 		break;
 	}
 	case LVN_KEYDOWN: {
+		if (CaptureRow >= 0) break;     // 正在修改快捷键：按键只用于捕获，不执行功能
 		NMLVKEYDOWN* kd = reinterpret_cast<NMLVKEYDOWN*>(hdr);
 		int item = (int)SendMessageW(ListView, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
 		int row = RowFromItem(item);
@@ -858,12 +908,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 		return 0;
 	case WM_APP_HOTKEY: {
 		int row = (int)wp;
+		if (CaptureRow >= 0) return 0;      // 正在修改快捷键（轮询线程本身也不会投递）
 		if (row >= 0 && row < kRowCount) RowExecute(row);
 		return 0;
 	}
 	case WM_APP_HOTKEY_CAPTURED:
 		CaptureFinish(wp, lp);
 		return 0;
+	case WM_ACTIVATE:
+		// 切到游戏或其它窗口：放弃修改快捷键，免得在游戏里按的键被记成新快捷键
+		if (LOWORD(wp) == WA_INACTIVE) CaptureCancel();
+		break;
 	case WM_NOTIFY: {
 		NMHDR* hdr = reinterpret_cast<NMHDR*>(lp);
 		if (hdr->hwndFrom == ListView) return ListNotify(hdr);
@@ -954,11 +1009,31 @@ bool MainWindow_Create(HINSTANCE instance, int showCommand) {
 
 	int width = S(Config_GetInt(L"Setting", L"Width", 780));
 	int height = S(Config_GetInt(L"Setting", L"Height", 780));
+	// 不超过屏幕工作区（高 DPI / 小屏幕时，否则底部的选项会在屏幕外）
+	int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+	POINT cursor = { 0, 0 };
+	GetCursorPos(&cursor);
+	MONITORINFO mi;
+	mi.cbSize = sizeof(mi);
+	if (GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+		int workW = mi.rcWork.right - mi.rcWork.left;
+		int workH = mi.rcWork.bottom - mi.rcWork.top;
+		int maxW = workW - S(16), maxH = workH - S(16);
+		if (width > maxW) width = maxW;
+		if (height > maxH) height = maxH;
+		if (width < S(720)) width = S(720);         // 与 WM_GETMINMAXINFO 的最小尺寸一致
+		if (height < S(420)) height = S(420);
+		// 接近整个工作区时，系统默认位置会让窗口底部出界：改为放在工作区左上角
+		if (width > workW * 3 / 4 || height > workH * 3 / 4) {
+			x = mi.rcWork.left + S(8);
+			y = mi.rcWork.top + S(8);
+		}
+	}
 	wchar_t title[128];
 	_snwprintf(title, 127, L"%ls %ls（大象修改器 C++ 重制版）", TRAINER_TITLE, TRAINER_VERSION);
 	title[127] = 0;
 	HWND hwnd = CreateWindowExW(0, wc.lpszClassName, title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-		CW_USEDEFAULT, CW_USEDEFAULT, width, height, NULL, NULL, instance, NULL);
+		x, y, width, height, NULL, NULL, instance, NULL);
 	if (!hwnd) return false;
 	ShowWindow(hwnd, showCommand);
 	UpdateWindow(hwnd);

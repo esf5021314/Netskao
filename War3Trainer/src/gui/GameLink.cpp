@@ -10,9 +10,15 @@ static HANDLE SharedHandle = NULL;
 static W3T_Shared* Shared = NULL;
 static UINT CommandMessage = 0;
 static DWORD InjectTick = 0;            // 注入时间，用于判断模块无响应
+static DWORD ConnectTick = 0;           // 打开共享内存的时间，用于判断模块初始化超时
 static DWORD ErrorTick = 0;             // 出错时间，出错后 3 秒再重试
 static bool InjectedOnce = false;       // 本次连接已注入过，避免重复注入
 static bool InGameMessages = true;
+static LONG LastHeartbeat = 0;          // 最近一次看到的模块心跳
+static DWORD HeartbeatTick = 0;         // 心跳最近一次变化的时间
+
+static const DWORD kInitTimeoutMs = 20000;     // 模块初始化 / 卸载等待上限
+static const DWORD kStallMs = 10000;           // 心跳停止多久算“无响应”
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -52,6 +58,8 @@ static void ErrorSet(const wchar_t* format, ...) {
 static void SharedClose() {
 	if (Shared) { UnmapViewOfFile(Shared); Shared = NULL; }
 	if (SharedHandle) { CloseHandle(SharedHandle); SharedHandle = NULL; }
+	ConnectTick = 0;
+	Info.stalled = false;
 }
 
 static void Disconnect() {
@@ -62,6 +70,15 @@ static void Disconnect() {
 	Info.exeName[0] = 0;
 	InjectedOnce = false;
 	InjectTick = 0;
+}
+
+// 投递消息的目标窗口：优先用模块报告的当前魔兽窗口（魔兽切换分辨率 / 全屏时可能重建窗口）
+static HWND TargetWindow() {
+	if (Shared && Shared->magic == W3T_SHARED_MAGIC) {
+		HWND hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(Shared->gameHwnd));
+		if (hwnd && IsWindow(hwnd)) return hwnd;
+	}
+	return Info.hwnd;
 }
 
 // 进程中是否已加载指定模块
@@ -209,26 +226,56 @@ void GameLink_Poll() {
 
 	// 已连接：检查模块状态
 	if (Shared) {
-		if (Shared->magic != W3T_SHARED_MAGIC) return;
-		if (Shared->abiVersion != W3T_ABI_VERSION) {
+		if (Shared->magic != W3T_SHARED_MAGIC) {
+			// 模块还没写好头部；一直不写说明是不认识的旧版本模块
+			if (ConnectTick && now - ConnectTick > kInitTimeoutMs) {
+				ErrorSet(L"游戏里已加载另一个版本的修改器模块，请重启游戏后再连接");
+			} else {
+				Info.phase = LINK_INJECTING;
+			}
+			return;
+		}
+		if (Shared->abiVersion != W3T_ABI_VERSION || Shared->structSize != sizeof(W3T_Shared)) {
 			ErrorSet(L"游戏里已加载另一个版本的修改器模块，请重启游戏后再连接");
 			return;
 		}
+		// 每次都写一遍“游戏内显示提示”：新连接的模块默认是开启的
+		Shared->inGameMessages = InGameMessages ? 1 : 0;
 		switch (Shared->dllState) {
-		case DLL_READY:
-			Info.phase = LINK_READY;
+		case DLL_READY: {
+			LONG heartbeat = Shared->heartbeat;
+			if (Info.phase != LINK_READY) {
+				Info.phase = LINK_READY;
+				Info.session++;
+				Info.resultBase = Shared->resultCounter;     // 连接之前的结果不显示
+				Info.stalled = false;
+				LastHeartbeat = heartbeat;
+				HeartbeatTick = now;
+			}
+			HWND hwnd = TargetWindow();
+			if (hwnd) Info.hwnd = hwnd;
+			// 心跳由模块的定时器驱动；长时间不变说明游戏没有处理消息（读图卡住或无响应）
+			if (heartbeat != LastHeartbeat) {
+				LastHeartbeat = heartbeat;
+				HeartbeatTick = now;
+				Info.stalled = false;
+			} else if (now - HeartbeatTick > kStallMs) {
+				Info.stalled = true;
+			}
 			return;
+		}
 		case DLL_FAILED:
 			ErrorSet(L"%ls", Shared->initError);
 			return;
 		case DLL_UNLOADED:
-			// 上一次退出时模块已卸载，重新注入
+			// 模块已卸载（正在释放），等它从游戏里消失后重新注入
 			SharedClose();
 			InjectedOnce = false;
+			InjectTick = 0;
 			break;
 		default:
 			Info.phase = LINK_INJECTING;
-			if (InjectTick && now - InjectTick > 20000) ErrorSet(L"修改器模块初始化超时（没有找到魔兽窗口？）");
+			if (ConnectTick && now - ConnectTick > kInitTimeoutMs) ErrorSet(L"修改器模块初始化超时（没有找到魔兽窗口？）");
 			return;
 		}
 	}
@@ -242,24 +289,30 @@ void GameLink_Poll() {
 	}
 
 	// 模块已在游戏里（上次运行留下的）就直接连接，否则注入
-	if (SharedOpen()) { Info.phase = LINK_INJECTING; return; }
+	if (SharedOpen()) {
+		ConnectTick = now;
+		Info.phase = LINK_INJECTING;
+		return;
+	}
 	if (ModuleLoaded(Info.pid, W3T_DLL_NAME, &snapshotFailed)) {
+		// 模块在游戏里但没有共享内存：正在卸载，或者初始化失败
 		Info.phase = LINK_INJECTING;
 		if (!InjectTick) InjectTick = now;
-		if (now - InjectTick > 20000) ErrorSet(L"游戏里已有修改器模块但无法连接，请重启游戏");
+		if (now - InjectTick > kInitTimeoutMs) ErrorSet(L"游戏里已有修改器模块（可能是旧版本）但无法连接，请重启游戏");
 		return;
 	}
 	if (!InjectedOnce) {
 		if (!Inject()) return;
 		Info.phase = LINK_INJECTING;
-	} else if (now - InjectTick > 20000) {
+	} else if (now - InjectTick > kInitTimeoutMs) {
 		ErrorSet(L"注入后修改器模块没有响应");
 	}
 }
 
 void GameLink_Shutdown(bool unloadModule) {
-	if (Shared && unloadModule && Shared->dllState == DLL_READY && Info.hwnd) {
-		PostMessageW(Info.hwnd, CommandMessage, W3T_WP_UNLOAD, 0);
+	HWND target = TargetWindow();
+	if (Shared && unloadModule && Shared->dllState == DLL_READY && target) {
+		PostMessageW(target, CommandMessage, W3T_WP_UNLOAD, 0);
 		// 等模块还原补丁（最多 1.5 秒；游戏卡在加载界面时可能来不及处理）
 		for (int i = 0; i < 30 && Shared->dllState != DLL_UNLOADED; ++i) Sleep(50);
 	}
@@ -282,7 +335,7 @@ LONG GameLink_SendCommand(int cmd, int iarg, float farg) {
 	InterlockedExchange(&slot.seq, seq);
 	InterlockedExchange(&shm->cmdSeq, seq);
 	shm->inGameMessages = InGameMessages ? 1 : 0;
-	if (!PostMessageW(Info.hwnd, CommandMessage, W3T_WP_COMMAND, seq)) return 0;
+	if (!PostMessageW(TargetWindow(), CommandMessage, W3T_WP_COMMAND, seq)) return 0;
 	return seq;
 }
 
@@ -292,10 +345,11 @@ bool GameLink_SetToggle(int toggleId, bool want, int argument) {
 	shm->toggleArg[toggleId] = argument;
 	shm->toggleWant[toggleId] = want ? 1 : 0;
 	shm->inGameMessages = InGameMessages ? 1 : 0;
-	return PostMessageW(Info.hwnd, CommandMessage, W3T_WP_SYNC_TOGGLES, 0) != FALSE;
+	return PostMessageW(TargetWindow(), CommandMessage, W3T_WP_SYNC_TOGGLES, 0) != FALSE;
 }
 
 void GameLink_SetInGameMessages(bool enable) {
 	InGameMessages = enable;
-	if (Shared) Shared->inGameMessages = enable ? 1 : 0;
+	// 模块头部有效时才写；否则等 GameLink_Poll 在头部写好后再写（模块初始化时会清零共享内存）
+	if (Shared && Shared->magic == W3T_SHARED_MAGIC) Shared->inGameMessages = enable ? 1 : 0;
 }

@@ -18,9 +18,12 @@ enum LinkPhase {
 struct LinkInfo {
 	LinkPhase phase;
 	DWORD pid;
-	HWND hwnd;
+	HWND hwnd;              // 投递命令的魔兽窗口（魔兽重建窗口后由模块报告新窗口）
 	wchar_t exeName[64];
 	bool elevated;          // 修改器自身是否以管理员身份运行
+	bool stalled;           // 已连接，但模块超过 10 秒没有心跳（读图卡住 / 游戏无响应）
+	LONG session;           // 每次进入“已连接”状态 +1
+	LONG resultBase;        // 进入“已连接”时模块的结果序号，之前的结果不再显示
 };
 
 void GameLink_Init();

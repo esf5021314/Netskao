@@ -2,7 +2,7 @@
 // 连接链路测试（控制台）。配合 tests/mock 下的模拟魔兽进程使用，检查：
 //   查找窗口 → 注入 War3Trainer.dll → 共享内存 → 版本识别（模拟 1.24E）
 //   → 窗口消息投递命令 → 结果回传（不在游戏中 / 读取游戏内存出错被拦截）
-//   → 开关切换被拒绝（补丁处字节与原版不一致）→ 卸载模块
+//   → 结果环形区 → “游戏内显示提示”设置推送 → 开关在游戏外被拒绝 → 卸载模块
 #include "../src/gui/stdafx.h"
 #include "../src/gui/GameLink.h"
 #include <stdio.h>
@@ -40,6 +40,7 @@ static bool WaitCounter(W3T_Shared* shm, LONG before, int ms) {
 int main() {
 	SetConsoleOutputCP(CP_UTF8);
 	GameLink_Init();
+	GameLink_SetInGameMessages(false);      // 连接之前设置，连接后应推送给模块（模块初始化时默认为开启）
 	printf("等待连接模拟游戏 ...\n");
 	bool ready = WaitReady(30000);
 	CHECK(ready, "连接成功（phase=%d）", GameLink_Info().phase);
@@ -48,6 +49,8 @@ int main() {
 	CHECK(shm->gameBuild == 6387, "识别版本 build=%lu 名称=%s", shm->gameBuild, U8(shm->versionName));
 	CHECK((shm->supportFlags & W3T_SUPPORT_NATIVES) && (shm->supportFlags & W3T_SUPPORT_VERIFIED), "支持位 %08lX", shm->supportFlags);
 	CHECK(shm->toggleSupport == 0x1F, "开关支持位 %08lX", shm->toggleSupport);
+	CHECK(shm->structSize == sizeof(W3T_Shared) && shm->abiVersion == W3T_ABI_VERSION, "协议版本 %lu，结构大小 %lu", shm->abiVersion, shm->structSize);
+	CHECK(shm->inGameMessages == 0, "连接前关闭的“游戏内显示提示”已推送给模块");
 
 	// 定时器心跳
 	LONG hb = shm->heartbeat;
@@ -68,16 +71,24 @@ int main() {
 	for (int i = 0; i < 10; ++i) GameLink_SendCommand(CMD_KILL, 0, 0.0f);
 	Sleep(1500);
 	CHECK(shm->resultCounter - before == 10, "连发 10 条命令全部处理（%ld 条）", shm->resultCounter - before);
+	// 结果环形区：最近 10 条都完整保存（界面一次刷新之间来了多条也不会丢）
+	int ringOk = 0;
+	for (LONG n = shm->resultCounter - 9; n <= shm->resultCounter; ++n) {
+		const W3T_ResultEntry& e = shm->results[n % W3T_RESULT_RING];
+		if (e.counter == n && e.cmd == CMD_KILL && e.code == RES_NOT_IN_GAME && e.text[0]) ++ringOk;
+	}
+	CHECK(ringOk == 10, "结果环形区保存了最近 10 条结果（%d 条完整）", ringOk);
 
-	// 开关：模拟的 Game.dll 里没有原版字节，应拒绝写入
-	before = shm->resultCounter;
-	GameLink_SetToggle(TGL_NO_DEFEAT, true, 0);
-	CHECK(WaitCounter(shm, before, 3000), "收到开关结果");
-	CHECK(shm->toggleState[TGL_NO_DEFEAT] == 0 && shm->toggleWant[TGL_NO_DEFEAT] == 0, "补丁被拒绝，开关保持关闭：%s", U8(shm->resultText));
-
-	before = shm->resultCounter;
-	GameLink_SetToggle(TGL_NOCD_NOMANA, true, 0);
-	CHECK(WaitCounter(shm, before, 3000) && shm->toggleState[TGL_NOCD_NOMANA] == 1, "无CD无蓝耗开关：%s", U8(shm->resultText));
+	// 开关：不在游戏中一律拒绝开启（不让补丁带进下一局，可能是多人游戏）
+	const int toggles[] = { TGL_NO_DEFEAT, TGL_NOCD_NOMANA };
+	for (int k = 0; k < 2; ++k) {
+		int id = toggles[k];
+		before = shm->resultCounter;
+		GameLink_SetToggle(id, true, 0);
+		CHECK(WaitCounter(shm, before, 3000), "收到开关 %d 的结果", id);
+		CHECK(shm->toggleState[id] == 0 && shm->toggleWant[id] == 0 && shm->resultCode == RES_NOT_IN_GAME,
+			"游戏外开启被拒绝，开关保持关闭：%s", U8(shm->resultText));
+	}
 
 	// 卸载
 	DWORD pid = GameLink_Info().pid;

@@ -44,7 +44,16 @@ void Hotkey_Start(HWND notifyWindow);
 void Hotkey_Stop();
 void Hotkey_SetBindings(const std::vector<HotkeyBinding>& bindings);
 void Hotkey_SetFilter(const HotkeyFilter& filter);
-void Hotkey_BeginCapture();     // 下一次按下的组合键通过 WM_APP_HOTKEY_CAPTURED 返回
+
+// 捕获新快捷键：下一次在修改器窗口里按下的组合键通过 WM_APP_HOTKEY_CAPTURED 返回，
+//   wParam = 结果种类 | (捕获编号 << 4)，lParam = Hotkey_Pack(组合键)
+// 返回本次捕获的编号；取消后或开始新的捕获后，旧编号的消息应当丢弃
+#define HK_CAPTURE_CANCEL  0    // 按了 Esc
+#define HK_CAPTURE_SET     1    // 设置为 lParam
+#define HK_CAPTURE_CLEAR   2    // 按了 Backspace / Delete：清除
+#define HK_CAPTURE_KIND(wp) ((int)((wp) & 0x0F))
+#define HK_CAPTURE_GEN(wp)  ((LONG)((DWORD)(wp) >> 4))
+LONG Hotkey_BeginCapture();
 void Hotkey_CancelCapture();
 
 #endif // HOTKEY_H_INCLUDED_

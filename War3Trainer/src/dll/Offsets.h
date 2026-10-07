@@ -34,6 +34,7 @@ DWORD Offset_GameBase();                        // 当前 Game.dll 基址
 #define GLOBAL_ITEMDATA_TABLE       21  // war3::ItemDataHashTable 物品数据哈希表（创建所有物品）
 #define GAME_MISC_GET_INT           22  // 读取 Misc 常量（整数）fastcall(段名 ecx, 键名 edx, 默认值)，ret 4
 #define STR_MISC_MAXHEROLEVEL       23  // 字符串常量 "MaxHeroLevel"
+#define GLOBAL_FOOD_CEILING_CACHE   24  // int  人口上限缓存（GetFoodCeiling 首次计算后保存，-1 = 未计算）
 
 /*<! END Offset !>*/ // 偏移定义结束标志
 

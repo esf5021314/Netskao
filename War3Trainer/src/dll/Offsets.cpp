@@ -65,6 +65,13 @@ static void InitManualOffsets() {
 	// 1.24E：MaxHeroLevel 的 9 处引用全部是 mov edx,"MaxHeroLevel" / mov ecx,"Misc" / call 0xAC90
 	OffsetSet(GAME_MISC_GET_INT, 6387, 0x00AC90);
 	OffsetSet(STR_MISC_MAXHEROLEVEL, 6387, 0x888368);
+
+	// 人口上限缓存（娱乐模式的人口部分即时生效 / 即时还原）
+	// 1.24E：GetFoodCeiling(0xAF10) 开头 mov eax,[0xA6575C] / cmp eax,-1 / jne 返回缓存值；
+	//        地图读取时由 0xAE60 重置为 -1，玩家初始化（0x3AF93B / 0x3B1485）把它复制到每个玩家
+	// 1.20E：同一函数（0x8C40 起）把结果写入 [0x7E7838]
+	OffsetSet(GLOBAL_FOOD_CEILING_CACHE, 6074, 0x7E7838);
+	OffsetSet(GLOBAL_FOOD_CEILING_CACHE, 6387, 0xA6575C);
 }
 
 static void InitMap() {

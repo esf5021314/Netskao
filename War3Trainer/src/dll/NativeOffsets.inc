@@ -1102,3 +1102,22 @@
 	OffsetSet(NATIVE_PauseGame, 7395, 0x217E20);
 	OffsetSet(NATIVE_PauseGame, 7680, 0x241CE0);
 	OffsetSet(NATIVE_PauseGame, 52240, 0x1F1AD0);
+
+	// GetUnitCurrentOrder
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6048, 0x2C53F0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6074, 0x2C5510);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6263, 0x2C8AE0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6300, 0x2C8B00);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6328, 0x3C0A20);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6352, 0x3C2740);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6372, 0x3C8200);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6374, 0x3C8200);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6378, 0x3C8200);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6384, 0x3C8260);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6387, 0x3C82C0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6397, 0x3C7550);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 6401, 0x3C7780);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 7085, 0x2039D0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 7395, 0x20C2F0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 7680, 0x2361B0);
+	OffsetSet(NATIVE_GetUnitCurrentOrder, 52240, 0x1E5F80);

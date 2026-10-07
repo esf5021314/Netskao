@@ -25,6 +25,7 @@ namespace jass {
 	enum {
 		PLAYER_STATE_RESOURCE_GOLD = 1,
 		PLAYER_STATE_RESOURCE_LUMBER = 2,
+		PLAYER_STATE_FOOD_CAP_CEILING = 6,
 		ALLIANCE_SHARED_CONTROL = 6,
 		ALLIANCE_SHARED_ADVANCED_CONTROL = 7,
 		UNIT_STATE_LIFE = 0,
@@ -82,6 +83,7 @@ namespace jass {
 	inline bool IsUnitType(handle u, int unitType) { return aero::generic_c_call<int>(Offset(NATIVE_IsUnitType), u, unitType) != 0; }
 	inline bool IssueTargetOrderById(handle u, int order, handle target) { return aero::generic_c_call<int>(Offset(NATIVE_IssueTargetOrderById), u, order, target) != 0; }
 	inline bool IssueImmediateOrderById(handle u, int order) { return aero::generic_c_call<int>(Offset(NATIVE_IssueImmediateOrderById), u, order) != 0; }
+	inline int GetUnitCurrentOrder(handle u) { return aero::generic_c_call<int>(Offset(NATIVE_GetUnitCurrentOrder), u); }
 
 	// ---- 英雄 ----
 	inline int GetHeroLevel(handle u) { return aero::generic_c_call<int>(Offset(NATIVE_GetHeroLevel), u); }

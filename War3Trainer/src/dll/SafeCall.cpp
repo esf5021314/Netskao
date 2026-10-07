@@ -57,6 +57,23 @@ extern "C" EXCEPTION_DISPOSITION __cdecl SafeSehHandler(EXCEPTION_RECORD* record
 	}
 	LastExceptionCode = record->ExceptionCode;
 	LastExceptionAddress = record->ExceptionAddress;
+
+	// 全局展开：依次以 EXCEPTION_UNWINDING 调用本帧之后注册的所有 SEH 处理函数
+	// （游戏自己的 __finally、C++ 析构等），然后 fs:[0] 指向本帧并返回。
+	// 与 MSVC __except 的 _global_unwind2 相同。x86 的 RtlUnwind 返回时不保证保留
+	// ebx/esi/edi（CRT 也是手工保存），所以用内联汇编声明这三个寄存器被破坏，由编译器保存。
+	void* unwindFrame = establisherFrame;
+	EXCEPTION_RECORD* unwindRecord = record;
+	__asm__ __volatile__(
+		"pushl $0\n\t"          // ReturnValue
+		"pushl %%edx\n\t"       // ExceptionRecord
+		"pushl $0\n\t"          // TargetIp（x86 忽略）
+		"pushl %%eax\n\t"       // TargetFrame = 本帧
+		"call _RtlUnwind@16"
+		: "+a"(unwindFrame), "+d"(unwindRecord)
+		:
+		: "ecx", "ebx", "esi", "edi", "memory", "cc");
+
 	SafeSehRecord* frame = static_cast<SafeSehRecord*>(establisherFrame);
 	__builtin_longjmp(frame->jumpBuffer, 1);
 	return ExceptionContinueSearch;	// 不会执行到这里
