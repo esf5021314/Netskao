@@ -16,8 +16,9 @@ void Trainer_Execute(W3T_Shared* shm, const W3T_CmdSlot& slot);
 // 对局画面没有刷新时代为回复命令（后台线程）；inGame = 对局还在（例如窗口最小化）
 void Trainer_Reject(W3T_Shared* shm, const W3T_CmdSlot& slot, bool inGame);
 
-// 按 shm->toggleWant[] 同步常驻开关
-void Trainer_SyncToggles(W3T_Shared* shm, bool gameThread);
+// 按 shm->toggleWant[] 同步常驻开关。后台线程调用时如果对局还在（只是画面没有刷新），
+// 不处理并返回 false，留给游戏线程
+bool Trainer_SyncToggles(W3T_Shared* shm, bool gameThread);
 
 // 约 100ms 一次（游戏线程）：刷新选中单位信息、维持“无CD无蓝耗”、清理施法单位、检查换图 / 多人游戏
 void Trainer_Tick(W3T_Shared* shm);

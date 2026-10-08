@@ -5,14 +5,16 @@
 //   2. 每帧挂钩（游戏线程，只在对局画面刷新时运行）：执行界面写入的命令、同步常驻开关，
 //      每 100ms 刷新一次状态（选中单位 / 无CD无蓝耗 / 清理施法单位）；
 //   3. 后台线程（每 100ms）：心跳；对局画面没有刷新时（主菜单 / 读图 / 窗口最小化）
-//      代为回复命令、在退出对局时还原代码补丁；处理卸载请求；
+//      代为回复命令；退出对局时还原代码补丁（暂停游戏线程后再写，见 Patch.cpp MemoryWrite）；
+//      不在对局中时处理卸载请求（对局中只是画面没刷新时，留给游戏线程在下一帧完整还原）；
 //   4. 卸载：还原补丁、卸下挂钩，由后台线程最后 FreeLibraryAndExitThread。
 //
 // 为什么用每帧挂钩（与原版 CE 脚本相同），而不是窗口消息：
-//   早期版本通过 PostMessage + 消息钩子让游戏主线程执行命令，在模拟环境里正常，
-//   但在真实的 1.24E 中这些消息从未被处理（界面显示“游戏暂时无响应”，快捷键没有任何反应）。
-//   每帧挂钩不依赖窗口和消息循环，是原版修改器实机验证过的做法；挂钩点在 18 个版本中
-//   都已用特征码定位（见 Offsets.cpp）。
+//   早期版本通过 PostMessage + WH_GETMESSAGE 消息钩子让游戏主线程执行命令，在模拟环境里正常，
+//   但在真实的 1.24E 中一条消息都没有处理（界面显示“游戏暂时无响应”，快捷键没有任何反应）：
+//   钩子是初始化线程安装的，而真实 Windows 会在安装钩子的线程退出时销毁钩子（Wine 不会）。
+//   每帧挂钩不依赖窗口、消息循环和任何属于某个线程的资源，是原版修改器实机验证过的做法；
+//   挂钩点在 18 个版本中都已用特征码定位（见 Offsets.cpp）。
 //
 // 线程约定：Trainer 的状态只在持有 Lock 时访问。每帧挂钩用 TryEnterCriticalSection，
 // 永远不会让游戏线程等待；后台线程只读内存、还原代码字节，不调用任何游戏函数。
@@ -148,8 +150,8 @@ static bool ToggleSyncNeeded() {
 
 static void TogglesSync(bool gameThread) {
 	if (!ToggleSyncNeeded()) return;
-	SyncedToggleSeq = Shared->toggleSeq;
-	Trainer_SyncToggles(Shared, gameThread);
+	LONG seq = Shared->toggleSeq;
+	if (Trainer_SyncToggles(Shared, gameThread)) SyncedToggleSeq = seq;    // 没处理（留给游戏线程）就保持待处理
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +171,7 @@ static void FrameEntry() {
 				InterlockedIncrement(&Shared->frameCount);
 				Shared->frameActive = 1;
 				Shared->frameThreadId = static_cast<LONG>(GetCurrentThreadId());
+				Patch_SetGameThread(GetCurrentThreadId());
 				if (Shared->unloadRequest) {
 					BridgeUnload(true);
 					return;
@@ -180,6 +183,9 @@ static void FrameEntry() {
 					Trainer_Tick(Shared);
 				}
 			});
+			// 这一帧的工作可能很久（大量复制等）：按离开挂钩的时间计算，免得后台线程误判“画面没有刷新”
+			DWORD done = GetTickCount();
+			LastFrameTick = done ? done : 1;
 		}
 		LeaveCriticalSection(&Lock);
 	}
@@ -201,13 +207,15 @@ static DWORD WINAPI ServiceThread(LPVOID) {
 				// 对局画面没有在刷新：主菜单 / 读图 / 窗口最小化。不能调用游戏函数，只做不需要游戏线程的事
 				Shared->frameActive = 0;
 				SafeRun([&] {
-					if (Shared->unloadRequest) {
-						BridgeUnload(false);
+					bool inGame = Trainer_Idle(Shared);     // 刚退出对局时这里会还原开关
+					if (Shared->unloadRequest && !inGame) {
+						BridgeUnload(false);                // 不在对局中：只需要还原代码字节
 						return;
 					}
-					bool inGame = Trainer_Idle(Shared);
+					// 对局还在、只是画面没刷新（全屏切到桌面）：卸载请求和开关改动都留给游戏线程，
+					// 回到游戏的下一帧完整处理（删除施法单位、取消暂停、还原人口上限）
 					CommandsDrain(false, inGame);
-					TogglesSync(false);
+					if (!inGame) TogglesSync(false);
 				});
 			}
 		}

@@ -82,13 +82,55 @@ static int HexParse(const char* hex, BYTE* out, int outSize) {
 	return n;
 }
 
-static bool MemoryWrite(void* address, const BYTE* data, int size) {
+// 只用 VirtualProtect / memcpy / FlushInstructionCache：游戏线程被暂停时也能安全调用（不碰堆和 CRT 的锁）
+static bool MemoryWriteRaw(void* address, const BYTE* data, int size) {
 	DWORD oldProtect;
 	if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldProtect)) return false;
 	memcpy(address, data, size);
 	VirtualProtect(address, size, oldProtect, &oldProtect);
 	FlushInstructionCache(GetCurrentProcess(), address, size);
 	return true;
+}
+
+// 游戏线程 ID（每帧挂钩里登记，见 Patch_SetGameThread）
+static volatile DWORD GameThreadId = 0;
+
+void Patch_SetGameThread(DWORD threadId) {
+	GameThreadId = threadId;
+}
+
+// 写代码字节。补丁前后的指令边界并不一致（例如 33 C0|40|59 C3 还原成 8B 40 18|59 C3），
+// 游戏线程如果正停在这几个字节中间，就会执行到半条指令。所以不在游戏线程写时，先暂停游戏线程，
+// 确认它的 EIP 不在要改的范围内（起点除外：新旧代码在起点都是指令边界）再写，写完立即恢复。
+// 与 Detours 的做法相同。魔兽的游戏逻辑只在游戏线程里运行，其它线程不会执行这些代码。
+static bool MemoryWrite(void* address, const BYTE* data, int size) {
+	DWORD game = GameThreadId;
+	if (!game || game == GetCurrentThreadId()) return MemoryWriteRaw(address, data, size);
+	HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, game);
+	if (!thread) return MemoryWriteRaw(address, data, size);       // 游戏线程已经结束
+	uintptr_t lo = reinterpret_cast<uintptr_t>(address), hi = lo + size;
+	bool ok = false;
+	for (int attempt = 0; attempt < 200; ++attempt) {
+		if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
+			ok = MemoryWriteRaw(address, data, size);
+			break;
+		}
+		CONTEXT context;
+		ZeroMemory(&context, sizeof(context));
+		context.ContextFlags = CONTEXT_CONTROL;
+		// GetThreadContext 同时保证线程已经真正停下（SuspendThread 是异步的）
+		bool known = GetThreadContext(thread, &context) != FALSE;
+		bool inside = !known || (context.Eip > lo && context.Eip < hi);
+		if (!inside || attempt == 199) {
+			ok = MemoryWriteRaw(address, data, size);
+			ResumeThread(thread);
+			break;
+		}
+		ResumeThread(thread);
+		Sleep(1);
+	}
+	CloseHandle(thread);
+	return ok;
 }
 
 static bool MemoryEqual(const void* address, const BYTE* data, int size) {

@@ -720,11 +720,15 @@ void Trainer_Reject(W3T_Shared* shm, const W3T_CmdSlot& slot, bool inGame) {
 	ResultPublish(shm, slot.seq, slot.cmd, r, false);
 }
 
-void Trainer_SyncToggles(W3T_Shared* shm, bool gameThread) {
+bool Trainer_SyncToggles(W3T_Shared* shm, bool gameThread) {
 	static const wchar_t* const kNames[TGL_COUNT] = { L"不会失败", L"娱乐模式", L"允许光环叠加", L"英雄最大等级", L"选中单位无CD无蓝耗" };
-	// 后台线程：只读内存判断是否在对局中（不调用游戏函数）
-	bool idleInGame = false;
-	if (!gameThread) SafeRun([&] { idleInGame = jass::NativesComplete(NULL) && IsInGame(); });
+	if (!gameThread) {
+		// 后台线程：只读内存判断是否在对局中（不调用游戏函数）。对局还在、只是画面没有刷新
+		// （全屏切到桌面）时什么都不做，开关改动留给游戏线程在回到游戏的下一帧处理
+		bool idleInGame = false;
+		SafeRun([&] { idleInGame = jass::NativesComplete(NULL) && IsInGame(); });
+		if (idleInGame) return false;
+	}
 
 	for (int id = 0; id < TGL_COUNT; ++id) {
 		bool want = shm->toggleWant[id] != 0;
@@ -736,11 +740,6 @@ void Trainer_SyncToggles(W3T_Shared* shm, bool gameThread) {
 		ResultSet(r, RES_OK, L"");
 		bool ok = false;
 		bool ran = SafeRun([&] {
-			if (!gameThread && idleInGame) {
-				// 对局还在，只是画面没有刷新（窗口最小化）：要等回到游戏线程才能处理
-				ResultSet(r, RES_FAILED, L"%ls：游戏画面没有在刷新（窗口最小化？），请切回游戏后再操作", kNames[id]);
-				return;
-			}
 			// 开启只能在单人游戏进行中：主菜单 / 大厅里打开的补丁会带进下一局（可能是多人游戏），
 			// 而且读图时游戏会缓存部分数值（例如人口上限），之后再还原代码也撤销不了。关闭任何时候都可以。
 			if (want && !have && kTogglesNeedGame) {
@@ -786,6 +785,7 @@ void Trainer_SyncToggles(W3T_Shared* shm, bool gameThread) {
 		if (ok) ResultSet(r, RES_OK, L"%ls：%ls", kNames[id], want ? L"已开启" : L"已关闭");
 		ResultPublish(shm, shm->resultSeq, -(id + 1), r, gameThread);
 	}
+	return true;
 }
 
 void Trainer_Tick(W3T_Shared* shm) {

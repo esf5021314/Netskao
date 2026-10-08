@@ -22,6 +22,9 @@ bool PatchIsEnabled(int toggleId);
 // 还原所有补丁（卸载时调用）
 void PatchRestoreAll();
 
+// 登记游戏线程：其它线程改代码字节时会先暂停游戏线程，确认它不在要改的指令中间
+void Patch_SetGameThread(DWORD threadId);
+
 // ---- 每帧挂钩（见 Patch.cpp）----
 // 挂上后，游戏每画一帧（CWorldFrameWar3 每帧函数）在游戏线程里调用一次 handler。
 // 安装 / 卸下都用 8 字节原子写入，游戏正在运行时操作也安全。

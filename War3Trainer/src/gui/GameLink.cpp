@@ -237,6 +237,9 @@ void GameLink_Poll() {
 			if (Info.phase != LINK_READY) {
 				Info.phase = LINK_READY;
 				Info.session++;
+				// 上一个修改器退出时如果游戏正处于全屏切到桌面的状态，卸载请求会留到回到游戏的下一帧；
+				// 现在又连上了，就取消这个请求，继续使用
+				if (Shared->unloadRequest) InterlockedExchange(&Shared->unloadRequest, 0);
 				Info.resultBase = Shared->resultCounter;     // 连接之前的结果不显示
 				Info.stalled = false;
 				LastHeartbeat = heartbeat;

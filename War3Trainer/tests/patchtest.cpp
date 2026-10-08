@@ -113,6 +113,18 @@ int main() {
 	Hex(0xAC90, 6, hex);
 	CHECK(strcmp(hex, "515355568BD9") == 0, "入口字节已还原 %s", hex);
 
+	printf("后台线程还原（暂停游戏线程后写入）：\n");
+	CHECK(Toggle(shm, TGL_AURA_STACK, true, 0), "游戏线程打开光环叠加");
+	CheckSites(TGL_AURA_STACK, true);
+	SendMessageW(hwnd, WM_APP + 78, 0, 0);      // 停止每帧：之后的开关由后台线程处理
+	for (int t = 0; t < 2000 && shm->frameActive; t += 50) Sleep(50);
+	CHECK(!shm->frameActive, "停止每帧");
+	CHECK(Toggle(shm, TGL_AURA_STACK, false, 0), "后台线程关闭光环叠加");
+	CheckSites(TGL_AURA_STACK, false);
+	CHECK(IsWindow(hwnd) && SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 2000, NULL), "模拟进程主线程已恢复运行（没有被挂起）");
+	SendMessageW(hwnd, WM_APP + 78, 1, 0);
+	for (int t = 0; t < 2000 && !shm->frameActive; t += 50) Sleep(50);
+
 	printf("卸载时自动还原：\n");
 	CHECK(Toggle(shm, TGL_FUN_MODE, true, 0), "打开娱乐模式");
 	GameLink_Shutdown(true);
