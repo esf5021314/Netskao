@@ -319,7 +319,7 @@ static void UiRefresh() {
 	case LINK_READY:
 		_snwprintf(line1, 255, L"游戏：%ls（PID %lu）    版本：%ls%ls    状态：%ls", info.exeName, info.pid,
 			shm->versionName, (shm->supportFlags & W3T_SUPPORT_VERIFIED) ? L"（已逐条核对）" : L"（未完全核对，部分功能可能无效）",
-			info.stalled ? L"游戏暂时无响应（读图中？）" : L"已连接");
+			info.stalled ? L"修改器模块没有响应（游戏卡住了？）" : L"已连接");
 		break;
 	default:
 		_snwprintf(line1, 255, L"错误：%ls", GameLink_Error());
@@ -331,6 +331,8 @@ static void UiRefresh() {
 		lstrcpyW(line2, L"全部功能都用快捷键操作；单击“快捷键”或“数值”列可以修改");
 	} else if (!shm->inGame) {
 		lstrcpyW(line2, L"不在游戏中 —— 进入地图后即可使用（换图后无需重新连接）");
+	} else if (!shm->frameActive) {
+		lstrcpyW(line2, L"游戏画面没有在刷新（窗口最小化？）—— 切回游戏后才能执行命令");
 	} else if (shm->humanPlayers > 1) {
 		_snwprintf(line2, 255, L"多人游戏（%ld 名玩家）—— 修改器只用于单人游戏，功能已停用", shm->humanPlayers);
 	} else if (shm->selValid) {
@@ -720,6 +722,10 @@ static LRESULT ListNotify(NMHDR* hdr) {
 	case LVN_BEGINSCROLL:
 		if (EditBox) EditEnd(true);
 		break;
+	case NM_KILLFOCUS:
+		// 焦点离开列表（点了复选框 / “关于”按钮、按 Tab）：放弃修改快捷键
+		CaptureCancel();
+		break;
 	}
 	return 0;
 }
@@ -918,6 +924,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 	case WM_ACTIVATE:
 		// 切到游戏或其它窗口：放弃修改快捷键，免得在游戏里按的键被记成新快捷键
 		if (LOWORD(wp) == WA_INACTIVE) CaptureCancel();
+		break;
+	case WM_LBUTTONDOWN:
+	case WM_RBUTTONDOWN:
+		// 点了横幅 / 空白处（不会改变焦点）：同样放弃修改快捷键
+		CaptureCancel();
 		break;
 	case WM_NOTIFY: {
 		NMHDR* hdr = reinterpret_cast<NMHDR*>(lp);

@@ -2,7 +2,7 @@
 // 自测程序（控制台），不需要游戏即可运行，用于检查：
 //   1. SafeInvoke 能拦截游戏函数里的访问违例，执行全局展开（通知游戏自己的 SEH 帧），并正确恢复 fs:[0]；
 //   2. 所有默认快捷键都能解析，并且格式化后再解析结果不变（包括没有名字、保存为 KeyXX 的键）；
-//   3. 偏移表：17 个版本的原生函数表完整，1.24E / 1.20E 的地址与原版 CE 脚本一致；
+//   3. 偏移表：17 个版本的原生函数表与每帧挂钩点完整，1.24E / 1.20E 的地址与原版 CE 脚本一致；
 //   4. 4 字符代码换算与原版脚本 `push 41496e76 //物品栏英雄` 一致。
 // 编译：见 build_mingw.sh（生成 build/selftest.exe），在 Windows 或 Wine 下运行。
 #include "../src/dll/stdafx.h"
@@ -133,6 +133,9 @@ static void TestOffsets() {
 		for (int n = 0; n < NATIVE_ID_COUNT; ++n) if (!Offset(NATIVE_ID_FIRST + n)) { complete = false; missing = NATIVE_ID_FIRST + n; break; }
 		CHECK(complete, "版本 %lu 缺少原生函数编号 %d", kBuilds[i], missing);
 		CHECK(Offset(GLOBAL_GAMEUI) && Offset(GLOBAL_GAMEWAR3), "版本 %lu 缺少全局对象地址", kBuilds[i]);
+		// 每帧挂钩：三个地址都要有，挂钩点 8 字节对齐（原子写入的前提），返回地址在挂钩点之外
+		DWORD hook = OffsetRva(GAME_FRAME_HOOK), ret = OffsetRva(GAME_FRAME_HOOK_RETURN), var = OffsetRva(GLOBAL_FRAME_HOOK_VAR);
+		CHECK(hook && ret && var && (hook & 7) == 0 && (ret < hook || ret > hook + 8), "版本 %lu 每帧挂钩数据不完整 %06lX / %06lX / %06lX", kBuilds[i], hook, ret, var);
 	}
 	// 1.24E：与原版 CE 脚本逐条比对
 	Offset_Init(6387, 0x6F000000);
@@ -154,6 +157,8 @@ static void TestOffsets() {
 		{ NATIVE_UnitRemoveAbility, 0x3c8e50, "UnitRemoveAbility" }, { NATIVE_UnitResetCooldown, 0x3c9210, "UnitResetCooldown" },
 		{ UNIT_FROM_HANDLE, 0x3be7f0, "InGame_GetUnitAddress" }, { UNIT_ADD_ABILITY_INTERNAL, 0x24d900, "InGame_UnitAddAbitily" },
 		{ GLOBAL_GAMEWAR3, 0xacd44c, "CGameWar3 全局" },
+		{ GAME_FRAME_HOOK, 0x4d3e30, "每帧挂钩点（原版 game.dll+4D3E30）" },
+		{ GLOBAL_FRAME_HOOK_VAR, 0xacecf0, "挂钩点原指令 mov [game.dll+0acecf0],ecx" },
 	};
 	for (size_t i = 0; i < sizeof(k124e) / sizeof(k124e[0]); ++i) {
 		CHECK(OffsetRva(k124e[i].id) == k124e[i].rva, "1.24E %s: %06lX != 原版 %06lX", k124e[i].name, OffsetRva(k124e[i].id), k124e[i].rva);
@@ -170,6 +175,7 @@ static void TestOffsets() {
 		{ NATIVE_CreateItem, 0x2bd4b0, "CreateItem" }, { NATIVE_UnitAddAbility, 0x2c84e0, "UnitAddAbility" },
 		{ NATIVE_UnitResetCooldown, 0x2c9410, "UnitResetCooldown" }, { UNIT_ADD_ABILITY_INTERNAL, 0x5cc280, "InGame_UnitAddAbitily" },
 		{ GLOBAL_GAMEWAR3, 0x8722bc, "CGameWar3 全局" },
+		{ GAME_FRAME_HOOK, 0x04dd90, "每帧挂钩点（原版 game.dll+4DD90）" },
 	};
 	for (size_t i = 0; i < sizeof(k120e) / sizeof(k120e[0]); ++i) {
 		CHECK(OffsetRva(k120e[i].id) == k120e[i].rva, "1.20E %s: %06lX != 原版 %06lX", k120e[i].name, OffsetRva(k120e[i].id), k120e[i].rva);

@@ -13,6 +13,7 @@ Game.dll 分析小工具（本工程核对地址时用的就是这些命令）
     python w3re.py bytes <Game.dll> <RVA> <长度>         打印原始字节（补丁表的“原始字节”就是这样取的）
     python w3re.py rtti  <Game.dll> <类名>               由 RTTI 名称（如 CWorldFrameWar3）找虚表地址
     python w3re.py order <Game.dll> <命令字符串>          由命令字符串（如 innerfire）找命令 ID
+    python w3re.py framehook <Game.dll>                 找每帧挂钩点（Offsets.cpp 的 GAME_FRAME_HOOK 三项）
 
 所有 RVA 均为十六进制，相对 Game.dll 基址。
 """
@@ -93,7 +94,39 @@ class Module:
         return None
 
 
+def framehook(mod):
+    """每帧挂钩点（与原版 CE 脚本相同的 Hook 入口）。
+
+    特征：CWorldFrameWar3 每帧函数把本帧时间累加到 [esi+390h]（fstp/fadd ...390h）之后，
+    紧接着 call X / mov ecx,eax / call 挂钩点，挂钩点是 89 0D <全局变量> C3（mov [全局变量],ecx / ret）。
+    返回 [(挂钩点, 返回地址, 全局变量, 挂钩点被调用次数)]，正常应唯一命中且调用次数为 3。
+    """
+    hits = []
+    lo, hi = mod.text_lo, mod.text_hi
+    code = mod.img[lo:hi]
+    for m in re.finditer(re.escape(b'\x8b\xc8\xe8'), code):
+        call = lo + m.start() + 2
+        target = call + 5 + struct.unpack_from('<i', mod.img, call + 1)[0]
+        if not (lo <= target < hi - 7):
+            continue
+        t = mod.img[target:target + 7]
+        if t[0:2] != b'\x89\x0d' or t[6] != 0xC3:
+            continue
+        if b'\x90\x03\x00\x00' not in mod.img[max(lo, call - 0x60):call]:
+            continue
+        var = struct.unpack_from('<I', mod.img, target + 2)[0] - mod.base
+        hits.append((target, call + 5, var, len(mod.xref(target))))
+    return hits
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == 'framehook':
+        mod = Module(argv[2])
+        hits = framehook(mod)
+        for hook, ret, var, n in hits:
+            print('挂钩点 %#08x  返回地址 %#08x  全局变量 %#08x  （挂钩点共 %d 处调用）' % (hook, ret, var, n))
+        print('共 %d 处%s' % (len(hits), '' if len(hits) == 1 else '（应当唯一命中，请人工核对）'))
+        return 0
     if len(argv) < 4:
         print(__doc__)
         return 1

@@ -8,7 +8,6 @@ static wchar_t ErrorText[256];
 static HANDLE Process = NULL;
 static HANDLE SharedHandle = NULL;
 static W3T_Shared* Shared = NULL;
-static UINT CommandMessage = 0;
 static DWORD InjectTick = 0;            // 注入时间，用于判断模块无响应
 static DWORD ConnectTick = 0;           // 打开共享内存的时间，用于判断模块初始化超时
 static DWORD ErrorTick = 0;             // 出错时间，出错后 3 秒再重试
@@ -18,7 +17,7 @@ static LONG LastHeartbeat = 0;          // 最近一次看到的模块心跳
 static DWORD HeartbeatTick = 0;         // 心跳最近一次变化的时间
 
 static const DWORD kInitTimeoutMs = 20000;     // 模块初始化 / 卸载等待上限
-static const DWORD kStallMs = 10000;           // 心跳停止多久算“无响应”
+static const DWORD kStallMs = 3000;            // 模块后台线程每 100ms 心跳一次，停止这么久算“无响应”
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -72,14 +71,6 @@ static void Disconnect() {
 	InjectTick = 0;
 }
 
-// 投递消息的目标窗口：优先用模块报告的当前魔兽窗口（魔兽切换分辨率 / 全屏时可能重建窗口）
-static HWND TargetWindow() {
-	if (Shared && Shared->magic == W3T_SHARED_MAGIC) {
-		HWND hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(Shared->gameHwnd));
-		if (hwnd && IsWindow(hwnd)) return hwnd;
-	}
-	return Info.hwnd;
-}
 
 // 进程中是否已加载指定模块
 static bool ModuleLoaded(DWORD pid, const wchar_t* name, bool* snapshotFailed) {
@@ -183,7 +174,6 @@ void GameLink_Init() {
 	ZeroMemory(&Info, sizeof(Info));
 	Info.elevated = SelfElevated();
 	DebugPrivilegeEnable();
-	CommandMessage = RegisterWindowMessageW(W3T_MSG_NAME);
 }
 
 void GameLink_Poll() {
@@ -252,9 +242,7 @@ void GameLink_Poll() {
 				LastHeartbeat = heartbeat;
 				HeartbeatTick = now;
 			}
-			HWND hwnd = TargetWindow();
-			if (hwnd) Info.hwnd = hwnd;
-			// 心跳由模块的定时器驱动；长时间不变说明游戏没有处理消息（读图卡住或无响应）
+			// 心跳由模块的后台线程驱动（与游戏画面无关）；长时间不变说明游戏进程卡死或被调试器暂停
 			if (heartbeat != LastHeartbeat) {
 				LastHeartbeat = heartbeat;
 				HeartbeatTick = now;
@@ -310,11 +298,10 @@ void GameLink_Poll() {
 }
 
 void GameLink_Shutdown(bool unloadModule) {
-	HWND target = TargetWindow();
-	if (Shared && unloadModule && Shared->dllState == DLL_READY && target) {
-		PostMessageW(target, CommandMessage, W3T_WP_UNLOAD, 0);
-		// 等模块还原补丁（最多 1.5 秒；游戏卡在加载界面时可能来不及处理）
-		for (int i = 0; i < 30 && Shared->dllState != DLL_UNLOADED; ++i) Sleep(50);
+	if (Shared && unloadModule && Shared->magic == W3T_SHARED_MAGIC && Shared->dllState == DLL_READY) {
+		// 请模块还原所有修改并卸载：对局中由游戏线程在下一帧处理，否则由模块后台线程处理
+		InterlockedExchange(&Shared->unloadRequest, 1);
+		for (int i = 0; i < 30 && Shared->dllState != DLL_UNLOADED; ++i) Sleep(50);    // 最多等 1.5 秒
 	}
 	Disconnect();
 }
@@ -333,9 +320,8 @@ LONG GameLink_SendCommand(int cmd, int iarg, float farg) {
 	slot.iarg = iarg;
 	slot.farg = farg;
 	InterlockedExchange(&slot.seq, seq);
-	InterlockedExchange(&shm->cmdSeq, seq);
 	shm->inGameMessages = InGameMessages ? 1 : 0;
-	if (!PostMessageW(TargetWindow(), CommandMessage, W3T_WP_COMMAND, seq)) return 0;
+	InterlockedExchange(&shm->cmdSeq, seq);     // 模块在下一帧（或后台线程的下一轮）看到新序号就执行
 	return seq;
 }
 
@@ -345,7 +331,8 @@ bool GameLink_SetToggle(int toggleId, bool want, int argument) {
 	shm->toggleArg[toggleId] = argument;
 	shm->toggleWant[toggleId] = want ? 1 : 0;
 	shm->inGameMessages = InGameMessages ? 1 : 0;
-	return PostMessageW(TargetWindow(), CommandMessage, W3T_WP_SYNC_TOGGLES, 0) != FALSE;
+	InterlockedIncrement(&shm->toggleSeq);      // 模块看到序号变化就同步开关
+	return true;
 }
 
 void GameLink_SetInGameMessages(bool enable) {

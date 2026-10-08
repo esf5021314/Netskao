@@ -7,7 +7,4 @@
 // DllMain(DLL_PROCESS_ATTACH) 中调用，启动初始化线程
 void Bridge_Attach(HMODULE self);
 
-// 子类化后的魔兽窗口过程
-LRESULT CALLBACK BridgeWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
-
 #endif // BRIDGE_H_INCLUDED_

@@ -1,12 +1,14 @@
 ﻿// 模块说明：
 // 补丁引擎测试（控制台）。配合以“真实 1.24E Game.dll”启动的模拟进程使用：
-//   MockGame.exe <1.24E Game.dll 路径>   然后运行 build/mock/patch/patchtest.exe
-// 同目录的 War3Trainer.dll 是测试版（W3T_TEST_BUILD）：模拟进程里没有对局，测试版允许在游戏外开启开关。
+//   build/mock/war3.exe <1.24E Game.dll 路径>   然后运行 build/mock/patch/patchtest.exe
+// 同目录的 War3Trainer.dll 是测试版（W3T_TEST_BUILD）：模拟进程里没有对局，测试版允许在对局外开启开关。
+// 测试开始时让模拟进程“每帧”调用挂钩点，开关和真实游戏一样在游戏线程里切换。
 // 逐个打开 / 关闭常驻开关，用 ReadProcessMemory 读回补丁处字节，确认写入与还原都正确；
 // “英雄最大等级”打开后通过测试消息调用被挂钩的 GetMiscInt，确认返回设定值。
 #include "../src/gui/stdafx.h"
 #include "../src/gui/GameLink.h"
 #include <stdio.h>
+#include <string.h>
 
 static int Failures = 0;
 static const char* U8(const wchar_t* text) {
@@ -75,6 +77,13 @@ int main() {
 	Base = shm->gameBase;
 	Process = OpenProcess(PROCESS_VM_READ, FALSE, GameLink_Info().pid);
 	CHECK(shm->gameBuild == 6387 && Base == 0x6F000000, "真实 Game.dll：build=%lu 基址=%08lX", shm->gameBuild, Base);
+	HWND hwnd = GameLink_Info().hwnd;
+	SendMessageW(hwnd, WM_APP + 78, 1, 0);      // 开始模拟每帧
+	for (int t = 0; t < 2000 && !shm->frameActive; t += 50) Sleep(50);
+	CHECK(shm->frameActive && shm->frameThreadId == (LONG)GetWindowThreadProcessId(hwnd, NULL), "每帧挂钩运行在模拟进程主线程");
+	char hook[40];
+	Hex(0x4D3E30, 6, hook);
+	CHECK(hook[0] == 'E' && hook[1] == '9', "每帧挂钩点 Game.dll+4D3E30 = %s", hook);
 
 	const int toggles[] = { TGL_NO_DEFEAT, TGL_FUN_MODE, TGL_AURA_STACK };
 	for (int k = 0; k < 3; ++k) {
@@ -94,7 +103,6 @@ int main() {
 	CHECK(Toggle(shm, TGL_MAX_HERO_LEVEL, true, 12345), "打开（等级 12345）");
 	Hex(0xAC90, 6, hex);
 	CHECK(hex[0] == 'E' && hex[1] == '9' && strcmp(hex + 10, "90") == 0, "入口已改为 JMP：%s", hex);
-	HWND hwnd = GameLink_Info().hwnd;
 	DWORD_PTR value = 0;
 	SendMessageTimeoutW(hwnd, WM_APP + 77, 0, 0, SMTO_ABORTIFHUNG, 3000, &value);
 	CHECK(value == 12345, "调用被挂钩的 GetMiscInt(\"Misc\", \"MaxHeroLevel\") 返回 %lu", (unsigned long)value);
@@ -110,6 +118,9 @@ int main() {
 	GameLink_Shutdown(true);
 	Sleep(800);
 	CheckSites(TGL_FUN_MODE, false);
+	Hex(0x4D3E30, 6, hook);
+	CHECK(strcmp(hook, "890DF0ECAC6F") == 0, "每帧挂钩点已还原 %s", hook);
+	SendMessageW(hwnd, WM_APP + 78, 0, 0);
 
 	printf(Failures ? "\n共 %d 项失败\n" : "\n全部通过\n", Failures);
 	return Failures ? 1 : 0;

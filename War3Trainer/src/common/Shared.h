@@ -1,37 +1,26 @@
 ﻿// ============================================================================
 //  Shared.h —— 界面程序（War3Trainer.exe）与注入模块（War3Trainer.dll）之间的通信协议
 //
-//  通信方式（与原版大象修改器同一思路：界面只负责“下命令”，真正调用游戏函数的
-//  代码运行在游戏主线程里）：
+//  通信方式（与原版大象修改器相同：界面只负责“下命令”，真正调用游戏函数的
+//  代码运行在游戏线程里）：
 //
 //    1. 注入模块在游戏进程内创建命名共享内存  Local\War3Trainer_Shm_<游戏进程PID>
 //       界面程序打开同一块共享内存，双方都映射为 W3T_Shared 结构。
-//    2. 界面把命令写进环形命令槽 ring[seq % W3T_CMD_RING]，然后
-//       PostMessage(魔兽窗口, RegisterWindowMessage(W3T_MSG_NAME), W3T_WP_COMMAND, seq)
-//    3. 注入模块在魔兽主线程上安装了消息钩子（WH_GETMESSAGE），主线程取出这条消息时
-//       （= 游戏主线程）执行命令，把结果写进 results[] 环形结果区。
-//
-//  原版 CE 脚本是 Hook 一个每帧调用的函数来轮询“信箱”（tablekey）；这里改为窗口消息，
-//  不需要为每个版本找 Hook 点，全版本通用。
+//    2. 界面把命令写进环形命令槽 ring[seq % W3T_CMD_RING]，再把 cmdSeq 改为 seq；
+//       开关写 toggleWant[] / toggleArg[] 后把 toggleSeq 加 1。不需要任何窗口消息。
+//    3. 注入模块与原版 CE 脚本一样挂钩“世界画面每帧调用的函数”（1.24E game.dll+4D3E30），
+//       游戏每画一帧就在游戏线程里检查一次信箱，执行命令，把结果写进 results[] 环形结果区。
+//    4. 不在对局中（主菜单 / 读图）时没有帧，由模块的后台线程回复“请先进入地图”。
 // ============================================================================
 #ifndef W3T_SHARED_H_INCLUDED_
 #define W3T_SHARED_H_INCLUDED_
 
 #include <windows.h>
 
-#define W3T_ABI_VERSION        4u                           // 结构有变化时递增
+#define W3T_ABI_VERSION        5u                           // 结构有变化时递增
 #define W3T_SHARED_MAGIC       0x52543357u                  // 'W3TR'，各版本不变，版本差异由 abiVersion 区分
 #define W3T_SHM_NAME_FMT       L"Local\\War3Trainer_Shm_%lu" // %lu = 游戏进程 PID
-#define W3T_MSG_NAME           L"War3Trainer.Command"       // RegisterWindowMessage 名称
 #define W3T_DLL_NAME           L"War3Trainer.dll"
-
-// ---- 窗口消息的 wParam ------------------------------------------------------
-enum W3T_WParam {
-    W3T_WP_COMMAND      = 1,    // lParam = 命令序号 seq
-    W3T_WP_SYNC_TOGGLES = 2,    // 按 toggleWant[] 同步常驻开关
-    W3T_WP_UNLOAD       = 3,    // 还原所有补丁并卸载注入模块
-    W3T_WP_PING         = 4     // 仅刷新状态
-};
 
 // ---- 命令编号（界面与注入模块共用，新增命令请追加到 CMD_COUNT 之前）------------
 enum W3T_CommandId {
@@ -122,6 +111,7 @@ enum W3T_DllState {
 #define W3T_SUPPORT_MAXLEVEL  0x08u   // 英雄最大等级挂钩
 #define W3T_SUPPORT_ITEMLIST  0x10u   // 物品数据表（创建所有物品）
 #define W3T_SUPPORT_ABILINT   0x20u   // 内部添加技能函数（重叠技能）
+#define W3T_SUPPORT_FRAMEHOOK 0x40u   // 每帧挂钩已安装（所有命令都依赖它）
 #define W3T_SUPPORT_VERIFIED  0x80u   // 本版本已逐条反汇编核对
 
 #define W3T_CMD_RING 32
@@ -154,13 +144,16 @@ struct W3T_Shared {
     volatile LONG dllState;             // W3T_DllState
     DWORD   gameBuild;                  // Game.dll 版本号末段（6387 = 1.24E）
     DWORD   gameBase;                   // Game.dll 基址
-    DWORD   gameHwnd;                   // 魔兽主窗口
+    DWORD   hookAddress;                // 每帧挂钩点的绝对地址（诊断用）
     DWORD   supportFlags;               // W3T_SUPPORT_*
     DWORD   toggleSupport;              // 位 i = 开关 i 在当前版本可用
     wchar_t versionName[16];            // “1.24E”
     wchar_t initError[128];             // 初始化失败原因
 
-    volatile LONG heartbeat;            // 模块定时器每次 +1
+    volatile LONG heartbeat;            // 模块后台线程每 100ms +1（模块活着）
+    volatile LONG frameCount;           // 游戏每画一帧 +1（只在对局中增加）
+    volatile LONG frameActive;          // 1 = 最近 0.5 秒内有帧（对局在运行、画面在刷新）
+    volatile LONG frameThreadId;        // 执行命令的游戏线程 ID（诊断用）
     volatile LONG inGame;               // 1 = 正在游戏中
     volatile LONG humanPlayers;         // 游戏中的真人玩家数
     volatile LONG localPlayerId;        // 本地玩家编号
@@ -185,7 +178,9 @@ struct W3T_Shared {
     W3T_CmdSlot   ring[W3T_CMD_RING];
     volatile LONG toggleWant[W3T_TOGGLE_SLOTS];    // 界面期望状态
     volatile LONG toggleArg[W3T_TOGGLE_SLOTS];     // 开关参数（如英雄最大等级）
+    volatile LONG toggleSeq;                       // 改了 toggleWant / toggleArg 后 +1，模块据此同步
     volatile LONG inGameMessages;                  // 1 = 在游戏画面左侧显示执行结果
+    volatile LONG unloadRequest;                   // 1 = 请模块还原所有修改并卸载
 
     DWORD reserved[32];
 };

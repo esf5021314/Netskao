@@ -1,5 +1,6 @@
 ﻿// 模块说明：
-// 与游戏的连接：查找魔兽窗口 → 打开进程 → 注入 War3Trainer.dll → 打开共享内存 → 投递命令。
+// 与游戏的连接：查找魔兽窗口 → 打开进程 → 注入 War3Trainer.dll → 打开共享内存 → 写入命令。
+// 命令只写进共享内存，由模块挂在游戏每帧函数上的挂钩在游戏线程里执行（不使用窗口消息）。
 // 界面每 0.5 秒调用一次 GameLink_Poll()，全程自动，不需要“连接游戏”按钮
 // （与原版一致：先开修改器还是先开游戏都可以）。
 #ifndef GAMELINK_H_INCLUDED_
@@ -18,10 +19,10 @@ enum LinkPhase {
 struct LinkInfo {
 	LinkPhase phase;
 	DWORD pid;
-	HWND hwnd;              // 投递命令的魔兽窗口（魔兽重建窗口后由模块报告新窗口）
+	HWND hwnd;              // 找到的魔兽窗口（只用来取得进程）
 	wchar_t exeName[64];
 	bool elevated;          // 修改器自身是否以管理员身份运行
-	bool stalled;           // 已连接，但模块超过 10 秒没有心跳（读图卡住 / 游戏无响应）
+	bool stalled;           // 已连接，但模块超过 3 秒没有心跳（游戏进程卡死）
 	LONG session;           // 每次进入“已连接”状态 +1
 	LONG resultBase;        // 进入“已连接”时模块的结果序号，之前的结果不再显示
 };

@@ -35,6 +35,12 @@ DWORD Offset_GameBase();                        // 当前 Game.dll 基址
 #define GAME_MISC_GET_INT           22  // 读取 Misc 常量（整数）fastcall(段名 ecx, 键名 edx, 默认值)，ret 4
 #define STR_MISC_MAXHEROLEVEL       23  // 字符串常量 "MaxHeroLevel"
 #define GLOBAL_FOOD_CEILING_CACHE   24  // int  人口上限缓存（GetFoodCeiling 首次计算后保存，-1 = 未计算）
+#define GAME_FOOD_CEILING_GET       28  // GetFoodCeiling：cdecl 无参数，返回人口上限；缓存为 -1 时重新计算并写回缓存
+
+// ---- 每帧挂钩（原版 CE 脚本的 Hook 入口，所有命令都在这里执行）----
+#define GAME_FRAME_HOOK             25  // 挂钩点：小函数 mov [GLOBAL_FRAME_HOOK_VAR], ecx / ret（1.24E 原版脚本 game.dll+4D3E30）
+#define GAME_FRAME_HOOK_RETURN      26  // 挂钩点在 CWorldFrameWar3 每帧函数里那次调用的返回地址（只在这次调用时执行修改器逻辑）
+#define GLOBAL_FRAME_HOOK_VAR       27  // 挂钩点写入的全局变量（用来核对挂钩点的原始字节 89 0D <地址>）
 
 /*<! END Offset !>*/ // 偏移定义结束标志
 

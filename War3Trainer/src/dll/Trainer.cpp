@@ -86,6 +86,7 @@ static void* LastGameObject = NULL;                // 用来发现“换图 / �
 static bool FoodApplied = false;
 static int FoodCacheSaved = -1;
 static int FoodPlayerSaved[jass::MAX_PLAYER_SLOTS];
+static bool FoodRecomputePending = false;          // 娱乐模式只还原了代码，下一次进入对局时要修正人口上限
 
 // 常驻开关只能在单人游戏进行中开启，离开游戏自动关闭。
 // 测试版模块（build_mingw.sh test 定义 W3T_TEST_BUILD，只给 tests/patchtest 用）运行在没有对局的
@@ -132,6 +133,11 @@ static UnitRef UnitRefMake(handle unit) {
 static bool UnitRefValid(const UnitRef& ref) {
 	if (!ref.unit || !ref.object) return false;
 	return UnitObjectGet(ref.unit) == ref.object && GetUnitTypeId(ref.unit) == ref.typeId;
+}
+
+// 只核对单位对象（变身 / 钻地等会改变单位类型，但仍是同一个单位）
+static bool UnitRefSameObject(const UnitRef& ref) {
+	return ref.unit && ref.object && UnitObjectGet(ref.unit) == ref.object;
 }
 
 // 内部函数添加技能（原版 InGame_UnitAddAbitily），可以重复添加同一技能
@@ -191,6 +197,7 @@ static bool CastWithDummy(handle owner, handle target, const char* const* abilit
 static void FoodCeilingApply(bool enable) {
 	int* cache = reinterpret_cast<int*>(Offset(GLOBAL_FOOD_CEILING_CACHE));
 	if (enable) {
+		FoodRecomputePending = false;
 		if (FoodApplied) return;
 		// 先全部保存再修改：中途出错时，已改动的部分也能在关闭时还原
 		for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
@@ -212,10 +219,29 @@ static void FoodCeilingApply(bool enable) {
 	}
 }
 
-// 关闭全部常驻开关。inGame = false 时游戏对象已经不在，只还原代码字节：
-// 人口缓存会在下一次读图时由游戏重置为 -1 重新计算，不能写回旧值
+// 娱乐模式只还原了代码（不在游戏线程 / 对局已经换了）之后，在游戏线程里修正人口上限：
+// 如果这一局读图时补丁还在，游戏已经按补丁算出 65535 并复制给每个玩家。缓存为 65535 时
+// 说明是补丁的结果（原版规则最多 300），重新按原版规则计算，并只修正仍是 65535 的玩家
+// （地图触发器自己设置的人口上限不动）。
+static void FoodCeilingRecompute(W3T_Shared* shm) {
+	FoodRecomputePending = false;
+	if (shm->toggleState[TGL_FUN_MODE]) return;         // 又开着娱乐模式：保持 65535
+	int* cache = reinterpret_cast<int*>(Offset(GLOBAL_FOOD_CEILING_CACHE));
+	void* fn = Offset(GAME_FOOD_CEILING_GET);
+	if (!cache || !fn || *cache != 65535) return;
+	*cache = -1;
+	int value = aero::generic_c_call<int>(fn);
+	for (int i = 0; i < MAX_PLAYER_SLOTS; ++i) {
+		handle p = Player(i);
+		if (GetPlayerState(p, PLAYER_STATE_FOOD_CAP_CEILING) == 65535) SetPlayerState(p, PLAYER_STATE_FOOD_CAP_CEILING, value);
+	}
+}
+
+// 关闭全部常驻开关。inGame = false 时只还原代码字节（不能调用游戏函数，或者游戏对象已经不在）：
+// 人口上限由下一次进入对局时的 FoodCeilingRecompute 修正
 static void TogglesRestoreAll(W3T_Shared* shm, bool inGame) {
 	if (inGame) SafeRun([&] { FoodCeilingApply(false); });
+	else if (FoodApplied || (shm && shm->toggleState[TGL_FUN_MODE])) FoodRecomputePending = true;
 	FoodApplied = false;
 	PatchRestoreAll();
 	if (shm) {
@@ -390,7 +416,7 @@ static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
 	case CMD_NO_COLLISION: {   // [127A] 无视碰撞体积
 		// 记录里的句柄必须仍是同一个单位（句柄会被回收），否则视为“未关闭”
 		std::map<handle, UnitRef>::iterator it = NoCollisionUnits.find(unit);
-		bool off = it != NoCollisionUnits.end() && UnitRefValid(it->second);
+		bool off = it != NoCollisionUnits.end() && UnitRefSameObject(it->second);
 		SetUnitPathing(unit, off ? 1 : 0);
 		if (off) NoCollisionUnits.erase(it); else NoCollisionUnits[unit] = UnitRefMake(unit);
 		ResultSet(r, RES_OK, off ? L"已恢复碰撞体积" : L"已无视碰撞体积（再按一次恢复）");
@@ -601,11 +627,12 @@ static void CommandRun(const W3T_CmdSlot& slot, CommandResult& r) {
 // ---------------------------------------------------------------------------
 // 对外接口
 // ---------------------------------------------------------------------------
-static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResult& r) {
+// gameThread = true 时（每帧挂钩里）才在游戏画面上显示文字：游戏函数只能在游戏线程调用
+static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResult& r, bool gameThread) {
 	if (!shm) return;
 	// 结果环：先把条目的 counter 清 0，写内容，最后写 counter（界面按顺序锁方式读取，不会读到写了一半的条目）
 	LONG n = shm->resultCounter + 1;
-	W3T_ResultEntry& e = shm->results[n % W3T_RESULT_RING];
+	W3T_ResultEntry& e = shm->results[(DWORD)n % W3T_RESULT_RING];
 	InterlockedExchange(&e.counter, 0);
 	e.seq = seq;
 	e.cmd = cmd;
@@ -619,7 +646,7 @@ static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResul
 	InterlockedExchange(&shm->resultSeq, seq);
 	InterlockedExchange(&shm->resultCounter, n);
 
-	if (shm->inGameMessages && r.code != RES_NOT_IN_GAME) {
+	if (gameThread && shm->inGameMessages && r.code != RES_NOT_IN_GAME) {
 		// 魔兽内部文字是 UTF-8；先拼宽字符串再统一转换，不依赖编译器的窄字符串编码
 		wchar_t wide[200];
 		_snwprintf(wide, 199, L"|cffffcc00[修改器]|r %ls", r.text);
@@ -630,6 +657,46 @@ static void ResultPublish(W3T_Shared* shm, LONG seq, int cmd, const CommandResul
 	}
 }
 
+static void NoticePublish(W3T_Shared* shm, int code, const wchar_t* text, bool gameThread) {
+	CommandResult r;
+	ResultSet(r, code, L"%ls", text);
+	ResultPublish(shm, shm->resultSeq, 0, r, gameThread);
+}
+
+static bool AnyToggleOn(W3T_Shared* shm) {
+	for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) if (shm->toggleState[id]) return true;
+	return false;
+}
+
+// 换图 / 退出游戏：清空本局的记录（句柄已经属于上一局）
+static void GameStateReset() {
+	DummyUnits.clear();
+	NoCollisionUnits.clear();
+	GamePausedByTrainer = false;
+	MultiplayerWarned = false;
+}
+
+// 对局切换检查（两个线程共用，只读内存、只还原代码字节）：
+// 退出游戏或换了一局时，常驻开关一律关闭，不让补丁带进下一局（读图时游戏会缓存部分数值，
+// 下一局还可能是多人游戏）。gameObject = NULL 表示不在对局中。
+static void GameTransitionCheck(W3T_Shared* shm, void* gameObject, bool gameThread) {
+	if (gameObject != LastGameObject) {
+		if (LastGameObject && AnyToggleOn(shm)) {
+			TogglesRestoreAll(shm, false);
+			NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭", gameThread);
+		}
+		GameStateReset();
+		LastGameObject = gameObject;
+	}
+	if (!gameObject && kTogglesNeedGame && AnyToggleOn(shm)) {     // 兜底：不在对局中不允许有开着的开关
+		TogglesRestoreAll(shm, false);
+		NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭", gameThread);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 对外接口
+// ---------------------------------------------------------------------------
 void Trainer_Execute(W3T_Shared* shm, const W3T_CmdSlot& slot) {
 	CommandResult r;
 	ResultSet(r, RES_OK, L"");
@@ -643,11 +710,22 @@ void Trainer_Execute(W3T_Shared* shm, const W3T_CmdSlot& slot) {
 		ResultSet(r, RES_EXCEPTION, L"执行时发生异常 %08lX @ %p，已拦截（游戏未受影响）",
 			SafeLastExceptionCode(), SafeLastExceptionAddress());
 	}
-	ResultPublish(shm, slot.seq, slot.cmd, r);
+	ResultPublish(shm, slot.seq, slot.cmd, r, true);
 }
 
-void Trainer_SyncToggles(W3T_Shared* shm) {
+void Trainer_Reject(W3T_Shared* shm, const W3T_CmdSlot& slot, bool inGame) {
+	CommandResult r;
+	if (inGame) ResultSet(r, RES_FAILED, L"游戏画面没有在刷新（窗口最小化？），请切回游戏后再试");
+	else ResultSet(r, RES_NOT_IN_GAME, L"请先进入地图（主菜单 / 读图时不能使用）");
+	ResultPublish(shm, slot.seq, slot.cmd, r, false);
+}
+
+void Trainer_SyncToggles(W3T_Shared* shm, bool gameThread) {
 	static const wchar_t* const kNames[TGL_COUNT] = { L"不会失败", L"娱乐模式", L"允许光环叠加", L"英雄最大等级", L"选中单位无CD无蓝耗" };
+	// 后台线程：只读内存判断是否在对局中（不调用游戏函数）
+	bool idleInGame = false;
+	if (!gameThread) SafeRun([&] { idleInGame = jass::NativesComplete(NULL) && IsInGame(); });
+
 	for (int id = 0; id < TGL_COUNT; ++id) {
 		bool want = shm->toggleWant[id] != 0;
 		bool have = shm->toggleState[id] != 0;
@@ -658,10 +736,15 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 		ResultSet(r, RES_OK, L"");
 		bool ok = false;
 		bool ran = SafeRun([&] {
+			if (!gameThread && idleInGame) {
+				// 对局还在，只是画面没有刷新（窗口最小化）：要等回到游戏线程才能处理
+				ResultSet(r, RES_FAILED, L"%ls：游戏画面没有在刷新（窗口最小化？），请切回游戏后再操作", kNames[id]);
+				return;
+			}
 			// 开启只能在单人游戏进行中：主菜单 / 大厅里打开的补丁会带进下一局（可能是多人游戏），
 			// 而且读图时游戏会缓存部分数值（例如人口上限），之后再还原代码也撤销不了。关闭任何时候都可以。
 			if (want && !have && kTogglesNeedGame) {
-				if (!jass::NativesComplete(NULL) || !IsInGame()) {
+				if (!gameThread || !jass::NativesComplete(NULL) || !IsInGame()) {
 					ResultSet(r, RES_NOT_IN_GAME, L"%ls：请先进入单人游戏再开启（退出游戏时会自动关闭）", kNames[id]);
 					return;
 				}
@@ -670,11 +753,11 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 					return;
 				}
 			}
-			if (id == TGL_NOCD_NOMANA) {        // 不是代码补丁，由定时器维持
+			if (id == TGL_NOCD_NOMANA) {        // 不是代码补丁，由每帧刷新维持
 				ok = true;
 				return;
 			}
-			bool inGame = IsInGame();
+			bool inGame = gameThread && IsInGame();
 			if (id == TGL_FUN_MODE && !want && inGame) FoodCeilingApply(false);     // 先还原人口，再还原代码
 			wchar_t reason[160];
 			reason[0] = 0;
@@ -685,7 +768,10 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 			}
 			if (id == TGL_FUN_MODE) {
 				if (want && inGame) FoodCeilingApply(true);
-				else if (!want) FoodApplied = false;
+				else if (!want && !inGame) {            // 只还原了代码：下一次进入对局时修正人口上限
+					FoodApplied = false;
+					FoodRecomputePending = true;
+				}
 			}
 		});
 		if (!ran) {
@@ -698,27 +784,8 @@ void Trainer_SyncToggles(W3T_Shared* shm) {
 			shm->toggleWant[id] = shm->toggleState[id];             // 失败：界面恢复原状态
 		}
 		if (ok) ResultSet(r, RES_OK, L"%ls：%ls", kNames[id], want ? L"已开启" : L"已关闭");
-		ResultPublish(shm, shm->resultSeq, -(id + 1), r);
+		ResultPublish(shm, shm->resultSeq, -(id + 1), r, gameThread);
 	}
-}
-
-static bool AnyToggleOn(W3T_Shared* shm) {
-	for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) if (shm->toggleState[id]) return true;
-	return false;
-}
-
-static void NoticePublish(W3T_Shared* shm, int code, const wchar_t* text) {
-	CommandResult r;
-	ResultSet(r, code, L"%ls", text);
-	ResultPublish(shm, shm->resultSeq, 0, r);
-}
-
-// 换图 / 退出游戏：清空本局的记录（句柄已经属于上一局）
-static void GameStateReset() {
-	DummyUnits.clear();
-	NoCollisionUnits.clear();
-	GamePausedByTrainer = false;
-	MultiplayerWarned = false;
 }
 
 void Trainer_Tick(W3T_Shared* shm) {
@@ -729,24 +796,12 @@ void Trainer_Tick(W3T_Shared* shm) {
 		bool inGame = complete && IsInGame();
 		void* gameObject = inGame ? GameObjectGet() : NULL;
 		shm->inGame = inGame ? 1 : 0;
-
-		// 退出游戏或换了一局：常驻开关一律关闭，不让补丁带进下一局
-		if (gameObject != LastGameObject) {
-			if (LastGameObject && AnyToggleOn(shm)) {
-				TogglesRestoreAll(shm, false);
-				NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭");
-			}
-			GameStateReset();
-			LastGameObject = gameObject;
-		}
+		GameTransitionCheck(shm, gameObject, true);
 		if (!inGame) {
 			shm->selValid = 0;
-			if (kTogglesNeedGame && AnyToggleOn(shm)) {     // 兜底：不在游戏中不允许有开着的开关
-				TogglesRestoreAll(shm, false);
-				NoticePublish(shm, RES_OK, L"已退出游戏，常驻开关已全部关闭");
-			}
 			return;
 		}
+		if (FoodRecomputePending) FoodCeilingRecompute(shm);
 
 		// 施法完成（当前命令回到 0）的施法单位立即删除；最长保留 30 秒。
 		// 用命令状态而不是固定时间判断：游戏暂停时施法也会暂停，不会被提前删掉。
@@ -777,7 +832,7 @@ void Trainer_Tick(W3T_Shared* shm) {
 			if (any) TogglesRestoreAll(shm, true);
 			for (int id = 0; id < W3T_TOGGLE_SLOTS; ++id) shm->toggleWant[id] = 0;
 			if (any || !MultiplayerWarned) {
-				NoticePublish(shm, RES_MULTIPLAYER, any ? L"检测到多人游戏，已自动关闭所有常驻开关" : L"检测到多人游戏，修改器功能已停用");
+				NoticePublish(shm, RES_MULTIPLAYER, any ? L"检测到多人游戏，已自动关闭所有常驻开关" : L"检测到多人游戏，修改器功能已停用", true);
 				MultiplayerWarned = true;
 			}
 			shm->selValid = 0;
@@ -802,17 +857,33 @@ void Trainer_Tick(W3T_Shared* shm) {
 	});
 }
 
-void Trainer_Shutdown(W3T_Shared* shm) {
+bool Trainer_Idle(W3T_Shared* shm) {
 	bool inGame = false;
+	void* gameObject = NULL;
+	// 只读内存：游戏对象可能正在释放，读错由 SafeRun 拦截
 	SafeRun([&] {
 		inGame = jass::NativesComplete(NULL) && IsInGame();
-		if (inGame) {
-			for (size_t i = 0; i < DummyUnits.size(); ++i) {
-				if (UnitRefValid(DummyUnits[i].ref)) RemoveUnit(DummyUnits[i].ref.unit);
-			}
-			if (GamePausedByTrainer) PauseGame(0);
-		}
+		gameObject = inGame ? GameObjectGet() : NULL;
 	});
+	shm->inGame = inGame ? 1 : 0;
+	if (!inGame) shm->selValid = 0;
+	GameTransitionCheck(shm, gameObject, false);
+	return inGame;
+}
+
+void Trainer_Shutdown(W3T_Shared* shm, bool gameThread) {
+	bool inGame = false;
+	if (gameThread) {
+		SafeRun([&] {
+			inGame = jass::NativesComplete(NULL) && IsInGame();
+			if (inGame) {
+				for (size_t i = 0; i < DummyUnits.size(); ++i) {
+					if (UnitRefValid(DummyUnits[i].ref)) RemoveUnit(DummyUnits[i].ref.unit);
+				}
+				if (GamePausedByTrainer) PauseGame(0);
+			}
+		});
+	}
 	GameStateReset();
 	TogglesRestoreAll(shm, inGame);
 }

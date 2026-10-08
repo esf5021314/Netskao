@@ -96,6 +96,39 @@ static bool MemoryEqual(const void* address, const BYTE* data, int size) {
 	return memcmp(address, data, size) == 0;
 }
 
+// 原子替换 8 字节对齐处的 8 个字节（lock cmpxchg8b）：当前内容等于 expect 才写入 replace。
+// 游戏线程同时执行这段代码时只会看到“全旧”或“全新”，不会执行到写了一半的指令，
+// 所以游戏运行中安装 / 卸下挂钩是安全的。
+static bool MemorySwap8(BYTE* address, const BYTE expect[8], const BYTE replace[8]) {
+	if ((reinterpret_cast<uintptr_t>(address) & 7) != 0 || IsBadReadPtr(address, 8)) return false;
+	LONGLONG oldValue, newValue;
+	memcpy(&oldValue, expect, 8);
+	memcpy(&newValue, replace, 8);
+	DWORD oldProtect;
+	if (!VirtualProtect(address, 8, PAGE_EXECUTE_READWRITE, &oldProtect)) return false;
+	LONGLONG seen = InterlockedCompareExchange64(reinterpret_cast<volatile LONGLONG*>(address), newValue, oldValue);
+	VirtualProtect(address, 8, oldProtect, &oldProtect);
+	FlushInstructionCache(GetCurrentProcess(), address, 8);
+	return seen == oldValue;
+}
+
+// 把函数入口的 6 字节从 expect 换成 replace：入口 8 字节对齐时用原子替换（后 2 字节保持不变），
+// 否则退回普通写入
+static bool CodeReplace6(BYTE* address, const BYTE expect[6], const BYTE replace[6]) {
+	if ((reinterpret_cast<uintptr_t>(address) & 7) == 0) {
+		BYTE current[8], wanted[8];
+		if (IsBadReadPtr(address, 8)) return false;
+		memcpy(current, address, 8);
+		if (memcmp(current, expect, 6) != 0) return false;
+		memcpy(wanted, replace, 6);
+		wanted[6] = current[6];
+		wanted[7] = current[7];
+		return MemorySwap8(address, current, wanted);
+	}
+	if (!MemoryEqual(address, expect, 6)) return false;
+	return MemoryWrite(address, replace, 6);
+}
+
 // ---------------------------------------------------------------------------
 // 英雄最大等级（1.20E 独有“英雄最大等级10W”，移植到 1.24E）
 //
@@ -147,15 +180,108 @@ static bool MaxLevelApply(bool enable, int level, wchar_t* reason, int reasonSiz
 	memcpy(jump + 1, &rel, 4);
 	jump[5] = 0x90;
 
+	// GetMiscInt 在主菜单 / 读图时也会被调用，用原子替换（1.24E 入口 0xAC90 是 16 字节对齐的）
 	if (enable) {
 		if (MemoryEqual(target, jump, 6)) return true;		// 已经挂上，只更新数值
 		if (!MemoryEqual(target, kMiscGetIntOrig, 6)) {
 			ReasonSet(reason, reasonSize, L"GetMiscInt 入口字节与原版不一致（可能被其它插件修改），已拒绝写入");
 			return false;
 		}
-		return MemoryWrite(target, jump, 6);
+		if (!CodeReplace6(target, kMiscGetIntOrig, jump)) {
+			ReasonSet(reason, reasonSize, L"写入 GetMiscInt 挂钩失败");
+			return false;
+		}
+		return true;
 	}
-	if (MemoryEqual(target, jump, 6)) return MemoryWrite(target, kMiscGetIntOrig, 6);
+	if (MemoryEqual(target, jump, 6)) return CodeReplace6(target, jump, kMiscGetIntOrig);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// 每帧挂钩（与原版 CE 脚本同一个 Hook 入口，见 Offsets.cpp 的说明）
+//
+// 挂钩点原文：  89 0D <全局变量>   mov [全局变量], ecx
+//               C3                 ret
+// 挂上之后：    E9 <存根>          jmp 存根
+//               90                 nop
+//               C3                 ret（不变）
+// 存根：        mov [全局变量], ecx          ; 原指令，三处调用照常生效
+//               cmp dword ptr [esp], 返回地址 ; 只处理每帧函数那一次调用
+//               jne 结束
+//               pushad / pushfd
+//               call handler                 ; 修改器逻辑（游戏线程）
+//               popfd / popad
+//         结束：ret                          ; 直接返回调用者（原函数只剩 ret）
+//
+// 存根放在 VirtualAlloc 的独立内存里且不释放；卸下挂钩后存根不会再被执行。
+// ---------------------------------------------------------------------------
+static BYTE* FrameStub = NULL;
+static BYTE FrameOrig[8];           // 挂钩点原来的 8 个字节
+static BYTE FramePatched[8];        // 挂上之后的 8 个字节
+static bool FrameInstalled = false;
+
+bool FrameHookInstall(FrameHandler handler, wchar_t* reason, int reasonSize) {
+	if (FrameInstalled) return true;
+	BYTE* site = static_cast<BYTE*>(Offset(GAME_FRAME_HOOK));
+	DWORD returnAddress = reinterpret_cast<DWORD>(Offset(GAME_FRAME_HOOK_RETURN));
+	DWORD variable = reinterpret_cast<DWORD>(Offset(GLOBAL_FRAME_HOOK_VAR));
+	if (!site || !returnAddress || !variable || !handler) {
+		ReasonSet(reason, reasonSize, L"当前游戏版本没有每帧挂钩点数据");
+		return false;
+	}
+	if ((reinterpret_cast<uintptr_t>(site) & 7) != 0 || IsBadReadPtr(site, 8)) {
+		ReasonSet(reason, reasonSize, L"每帧挂钩点 Game.dll+%X 地址无效", OffsetRva(GAME_FRAME_HOOK));
+		return false;
+	}
+	BYTE expect[7] = { 0x89, 0x0D, 0, 0, 0, 0, 0xC3 };
+	memcpy(expect + 2, &variable, 4);
+	memcpy(FrameOrig, site, 8);
+	if (memcmp(FrameOrig, expect, 7) != 0) {
+		ReasonSet(reason, reasonSize, L"每帧挂钩点 Game.dll+%X 的字节与原版不一致（可能被其它修改器或插件改过），为安全起见没有挂钩",
+			OffsetRva(GAME_FRAME_HOOK));
+		return false;
+	}
+
+	if (!FrameStub) {
+		FrameStub = static_cast<BYTE*>(VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+		if (!FrameStub) {
+			ReasonSet(reason, reasonSize, L"申请挂钩存根内存失败（错误码 %lu）", GetLastError());
+			return false;
+		}
+	}
+	BYTE* p = FrameStub;
+	*p++ = 0x89; *p++ = 0x0D; memcpy(p, &variable, 4); p += 4;				// mov [全局变量], ecx
+	*p++ = 0x81; *p++ = 0x3C; *p++ = 0x24; memcpy(p, &returnAddress, 4); p += 4;	// cmp dword ptr [esp], 返回地址
+	*p++ = 0x75; *p++ = 0x09;												// jne 结束（跳过下面 9 字节）
+	*p++ = 0x60;															// pushad
+	*p++ = 0x9C;															// pushfd
+	*p++ = 0xE8;															// call handler
+	DWORD rel = reinterpret_cast<DWORD>(handler) - reinterpret_cast<DWORD>(p + 4);
+	memcpy(p, &rel, 4); p += 4;
+	*p++ = 0x9D;															// popfd
+	*p++ = 0x61;															// popad
+	*p++ = 0xC3;															// ret
+	FlushInstructionCache(GetCurrentProcess(), FrameStub, p - FrameStub);
+
+	FramePatched[0] = 0xE9;
+	rel = reinterpret_cast<DWORD>(FrameStub) - reinterpret_cast<DWORD>(site + 5);
+	memcpy(FramePatched + 1, &rel, 4);
+	FramePatched[5] = 0x90;
+	FramePatched[6] = FrameOrig[6];
+	FramePatched[7] = FrameOrig[7];
+	if (!MemorySwap8(site, FrameOrig, FramePatched)) {
+		ReasonSet(reason, reasonSize, L"写入每帧挂钩失败（错误码 %lu）", GetLastError());
+		return false;
+	}
+	FrameInstalled = true;
+	return true;
+}
+
+bool FrameHookRemove() {
+	if (!FrameInstalled) return true;
+	BYTE* site = static_cast<BYTE*>(Offset(GAME_FRAME_HOOK));
+	if (!site || !MemorySwap8(site, FramePatched, FrameOrig)) return false;
+	FrameInstalled = false;
 	return true;
 }
 

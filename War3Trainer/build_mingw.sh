@@ -30,8 +30,7 @@ if [ "$1" = "test" ]; then
     mkdir -p build/mock
     $CXX $COMMON -Iinclude -Isrc/dll -o build/selftest.exe tests/selftest.cpp \
         src/dll/SafeCall.cpp src/dll/Offsets.cpp src/dll/Jass.cpp src/gui/Hotkey.cpp src/gui/Rows.cpp
-    $WINDRES -O coff -o build/mock/fakegame.res.o tests/mock/FakeGame.rc
-    $CXX -O2 -shared -static -s -o build/mock/Game.dll tests/mock/FakeGame.cpp build/mock/fakegame.res.o
+    # 模拟魔兽进程：用法 build/mock/war3.exe <1.24E Game.dll 路径>（映射真实 Game.dll，模拟每帧调用挂钩点）
     $CXX -O2 -mwindows -static -s -o build/mock/war3.exe tests/mock/MockGame.cpp
     $CXX $COMMON -Isrc/gui -o build/mock/linktest.exe tests/linktest.cpp src/gui/GameLink.cpp -ladvapi32
     cp bin/War3Trainer.dll build/mock/

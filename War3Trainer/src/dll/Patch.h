@@ -22,4 +22,12 @@ bool PatchIsEnabled(int toggleId);
 // 还原所有补丁（卸载时调用）
 void PatchRestoreAll();
 
+// ---- 每帧挂钩（见 Patch.cpp）----
+// 挂上后，游戏每画一帧（CWorldFrameWar3 每帧函数）在游戏线程里调用一次 handler。
+// 安装 / 卸下都用 8 字节原子写入，游戏正在运行时操作也安全。
+typedef void (*FrameHandler)();
+bool FrameHookInstall(FrameHandler handler, wchar_t* reason, int reasonSize);
+// 卸下挂钩；挂钩点被其它程序改过时返回 false（此时不能卸载模块：存根还会调用模块里的代码）
+bool FrameHookRemove();
+
 #endif // PATCH_H_INCLUDED_
